@@ -243,6 +243,32 @@ mono_setmmapjit (int flag)
  * \p length must be a multiple of pagesize.
  * \returns NULL on failure, the address of the memory area otherwise
  */
+#ifdef HOST_QNX
+/*
+ * QNX commits an anonymous mapping's full size when it is made, unless it is
+ * MAP_LAZY, in which case each page is committed when first touched. Lazy
+ * mappings are for memory that is mostly never touched: reservations
+ * (PROT_NONE), the card tables (a byte per 512-byte card of the whole
+ * address space) and interpreter stacks. Memory the GC fills right away
+ * (nursery, heap blocks, large objects) stays eager, so that running out of
+ * memory fails here instead of on a first touch.
+ */
+static gboolean
+qnx_valloc_is_lazy (int flags, MonoMemAccountType type)
+{
+	if (!(flags & (MONO_MMAP_READ | MONO_MMAP_WRITE | MONO_MMAP_EXEC)))
+		return TRUE;
+	switch (type) {
+	case MONO_MEM_ACCOUNT_SGEN_CARD_TABLE:
+	case MONO_MEM_ACCOUNT_SGEN_SHADOW_CARD_TABLE:
+	case MONO_MEM_ACCOUNT_INTERP_STACK:
+		return TRUE;
+	default:
+		return FALSE;
+	}
+}
+#endif
+
 void*
 mono_valloc (void *addr, size_t length, int flags, MonoMemAccountType type)
 {
@@ -294,6 +320,10 @@ mono_valloc (void *addr, size_t length, int flags, MonoMemAccountType type)
 
 	mflags |= MAP_ANONYMOUS;
 	mflags |= MAP_PRIVATE;
+#ifdef HOST_QNX
+	if (qnx_valloc_is_lazy (flags, type))
+		mflags |= MAP_LAZY;
+#endif
 
 	BEGIN_CRITICAL_SECTION;
 	ptr = mmap (addr, length, prot, mflags, -1, 0);
@@ -366,6 +396,16 @@ mono_file_map_error (size_t length, int flags, int fd, guint64 offset, void **re
 		mflags |= MAP_PRIVATE;
 	if (flags & MONO_MMAP_SHARED)
 		mflags |= MAP_SHARED;
+#ifdef HOST_QNX
+	/*
+	 * A private file mapping on QNX commits twice its size when it is made
+	 * (the file's pages and a private copy). A read-only mapping never
+	 * needs the copy, and MAP_SHARED|MAP_LAZY costs only the pages read,
+	 * shared with every other process mapping the file.
+	 */
+	if (!(flags & MONO_MMAP_WRITE))
+		mflags = (mflags & ~MAP_PRIVATE) | MAP_SHARED | MAP_LAZY;
+#endif
 	if (flags & MONO_MMAP_FIXED)
 		mflags |= MAP_FIXED;
 #if !defined(__APPLE__)  // returning virtual addresses <4G requires entitlement on Apple platforms, do not use it
@@ -436,6 +476,14 @@ mono_mprotect (void *addr, size_t length, int flags)
 	int prot = prot_from_flags (flags);
 
 	if (flags & MONO_MMAP_DISCARD) {
+#ifdef HOST_QNX
+		/*
+		 * posix_madvise (POSIX_MADV_DONTNEED) frees nothing on QNX. Mapping fresh
+		 * lazy pages over the range frees the old ones and zeroes the range.
+		 */
+		if (mmap (addr, length, prot, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED | MAP_LAZY, -1, 0) == addr)
+			return 0;
+#endif
 		/* on non-linux the pages are not guaranteed to be zeroed (*bsd, osx at least) */
 #ifdef __linux__
 		if (madvise (addr, length, MADV_DONTNEED))
@@ -514,6 +562,26 @@ mono_mprotect (void *addr, size_t length, int flags)
 void*
 mono_valloc_aligned (size_t size, size_t alignment, int flags, MonoMemAccountType type)
 {
+#ifdef HOST_QNX
+	/*
+	 * Over-allocating to find an aligned address would commit the slack too,
+	 * however briefly. Reserve the range lazily and map the aligned part over
+	 * it with the requested flags, eager or lazy by type.
+	 */
+	char *mem = (char *) mono_valloc (NULL, size + alignment, MONO_MMAP_NONE | MONO_MMAP_PRIVATE | MONO_MMAP_ANON, type);
+	char *aligned;
+
+	if (!mem)
+		return NULL;
+
+	aligned = mono_aligned_address (mem, size, alignment);
+	if (mono_valloc (aligned, size, flags | MONO_MMAP_FIXED, type) != aligned) {
+		mono_vfree (mem, size + alignment, type);
+		return NULL;
+	}
+	/* Both mono_valloc calls accounted the aligned part. */
+	mono_account_mem (type, -(ssize_t)size);
+#else
 	/* Allocate twice the memory to be able to put the block on an aligned address */
 	char *mem = (char *) mono_valloc (NULL, size + alignment, flags, type);
 	char *aligned;
@@ -522,6 +590,7 @@ mono_valloc_aligned (size_t size, size_t alignment, int flags, MonoMemAccountTyp
 		return NULL;
 
 	aligned = mono_aligned_address (mem, size, alignment);
+#endif
 
 	if (aligned > mem)
 		mono_vfree (mem, aligned - mem, type);
