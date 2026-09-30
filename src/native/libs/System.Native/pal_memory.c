@@ -17,6 +17,11 @@
 #elif HAVE_MALLOC_USABLE_SIZE_NP
     #include <malloc_np.h>
     #define MALLOC_SIZE(s) malloc_usable_size(s)
+#elif HAVE_MSIZE
+    // QNX's libc has Watcom's _msize (in libc.a and libcS.a), undeclared in its headers.
+    // It must cover posix_memalign blocks: SystemNative_AlignedRealloc copies this many bytes.
+    size_t _msize(void* ptr);
+    #define MALLOC_SIZE(s) _msize(s)
 #endif
 
 // These functions look like simple wrappers around the standard C library functions, but they are actually

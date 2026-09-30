@@ -569,6 +569,10 @@ check_symbol_exists(
     malloc_usable_size
     malloc_np.h
     HAVE_MALLOC_USABLE_SIZE_NP)
+# QNX's _msize is in its libc but in none of its headers.
+check_function_exists(
+    _msize
+    HAVE_MSIZE)
 check_symbol_exists(
     posix_memalign
     stdlib.h
@@ -663,6 +667,11 @@ check_symbol_exists(
     futimes
     sys/time.h
     HAVE_FUTIMES)
+
+check_symbol_exists(
+    mkdtemp
+    "stdlib.h;unistd.h"
+    HAVE_MKDTEMP)
 
 check_symbol_exists(
     futimens
