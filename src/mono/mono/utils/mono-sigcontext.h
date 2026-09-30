@@ -88,7 +88,12 @@
 	#define UCONTEXT_REG_EDI(ctx) (((ucontext_t*)(ctx))->sc_edi)
 	#define UCONTEXT_REG_EIP(ctx) (((ucontext_t*)(ctx))->sc_eip)
 #elif defined(__QNXNTO__)
-	/* <x86/context.h>: X86_CPU_REGISTERS */
+	/*
+	 * <x86/context.h>: X86_CPU_REGISTERS. UCONTEXT_HAS_XMM is deliberately
+	 * left undefined: QNX 6.5 does not save the interrupted FPU/SSE state in
+	 * uc_mcontext.fpu, so it must be neither read nor written (the state is
+	 * kept by mono-signal-qnx.c's trampoline instead).
+	 */
 	#define UCONTEXT_REG_EAX(ctx) (((ucontext_t*)(ctx))->uc_mcontext.cpu.eax)
 	#define UCONTEXT_REG_EBX(ctx) (((ucontext_t*)(ctx))->uc_mcontext.cpu.ebx)
 	#define UCONTEXT_REG_ECX(ctx) (((ucontext_t*)(ctx))->uc_mcontext.cpu.ecx)

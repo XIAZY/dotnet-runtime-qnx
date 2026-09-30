@@ -426,9 +426,9 @@ static void CloseSignalHandlingPipe(void)
 
 #if defined(__QNXNTO__) && defined(__i386__)
 // QNX 6.5 does not reliably preserve the interrupted code's FPU/SSE
-// registers around a signal handler (measured on QNX 6.5.0 x86: a handler
-// that writes xmm registers changed the interrupted code's values in 4 runs
-// in 10). This library is built with SSE2, so its handler is entered through
+// registers around a signal handler (measured on QNX 6.5.0 x86: when a
+// handler writes xmm registers, the interrupted code finds its values
+// changed after about 9 handler runs in 10). This library is built with SSE2, so its handler is entered through
 // a trampoline, in assembly so that no compiler-generated code runs first,
 // that saves the state with fxsave and restores it with fxrstor. The fxsave
 // area is 512 bytes and 16-byte aligned; QNX aligns the stack to 4 bytes.
@@ -452,7 +452,11 @@ __asm__(
     "    subl $524, %esp\n"
     "    andl $-16, %esp\n"
     "    fxsave (%esp)\n"
+    "    cld\n"                    // the handler starts from the ABI's state, as on Linux:
+    "    fninit\n"                 // direction flag clear, x87 initialised,
     "    subl $16, %esp\n"
+    "    movl $0x1f80, 0(%esp)\n"  // and the default MXCSR
+    "    ldmxcsr 0(%esp)\n"
     "    movl 8(%ebp), %eax\n"
     "    movl %eax, 0(%esp)\n"
     "    movl 12(%ebp), %eax\n"
