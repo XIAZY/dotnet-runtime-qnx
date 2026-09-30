@@ -17,6 +17,24 @@
 #error "NAME_MAX is not defined"
 #endif
 
+#if !HAVE_TIMEGM
+// Without timegm (QNX 6.5's libc has none; only libnbutil does). This is the inverse
+// of gmtime for the fields ASN1_TIME_to_tm fills: days from the civil date,
+// then seconds, with no time zone or DST involved.
+static time_t timegm(struct tm* tm)
+{
+    int64_t y = (int64_t)tm->tm_year + 1900;
+    int64_t m = tm->tm_mon + 1;
+    y -= m <= 2;
+    int64_t era = (y >= 0 ? y : y - 399) / 400;
+    int64_t yoe = y - era * 400;
+    int64_t doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + tm->tm_mday - 1;
+    int64_t doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    int64_t days = era * 146097 + doe - 719468;
+    return (time_t)(days * 86400 + tm->tm_hour * 3600 + tm->tm_min * 60 + tm->tm_sec);
+}
+#endif
+
 c_static_assert(PAL_X509_V_OK == X509_V_OK);
 c_static_assert(PAL_X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT == X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT);
 c_static_assert(PAL_X509_V_ERR_UNABLE_TO_GET_CRL == X509_V_ERR_UNABLE_TO_GET_CRL);
@@ -483,7 +501,12 @@ static X509* ReadNextPublicCert(DIR* dir, X509Stack* tmpStack, char* pathTmp, si
 
     while ((next = readdir(dir)) != NULL)
     {
+#if HAVE_STRNLEN
         size_t len = strnlen(next->d_name, NAME_MAX);
+#else
+        // QNX 6.5's libc has no strnlen; the name is NUL-terminated.
+        size_t len = strlen(next->d_name);
+#endif
 
         if (len > 4 && 0 == strncasecmp(".pfx", next->d_name + len - 4, 4))
         {
