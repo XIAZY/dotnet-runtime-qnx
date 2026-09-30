@@ -14,8 +14,9 @@
 // using sysctl to gather protocol statistics information.
 // Currently, this is all keyed off of whether the include tcp_var.h
 // exists, but we may want to make this more granular for different platforms.
+// QNX has tcp_var.h from its NetBSD-derived stack, but not FreeBSD's control blocks.
 
-#if HAVE_NETINET_TCP_VAR_H
+#if HAVE_NETINET_TCP_VAR_H && !defined(__QNXNTO__)
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wreserved-id-macro"
 #pragma clang diagnostic ignored "-Wunused-macros"
