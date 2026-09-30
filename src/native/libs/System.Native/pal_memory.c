@@ -19,6 +19,11 @@
     #define MALLOC_SIZE(s) malloc_usable_size(s)
 #elif defined(TARGET_SUNOS)
     #define MALLOC_SIZE(s) (*((size_t*)(s)-1))
+#elif defined(__QNXNTO__)
+    // QNX's libc has Watcom's _msize (in libc.a and libcS.a), undeclared in its headers.
+    // It must cover posix_memalign blocks: SystemNative_AlignedRealloc copies this many bytes.
+    size_t _msize(void* ptr);
+    #define MALLOC_SIZE(s) _msize(s)
 #else
     #error "Platform doesn't support malloc_usable_size or malloc_size"
 #endif

@@ -73,7 +73,14 @@ int32_t SystemNative_FUTimens(intptr_t fd, TimeSpec* times)
     updatedTimes[1].tv_sec = (long)times[1].tv_sec;
     updatedTimes[1].tv_usec = (int)times[1].tv_nsec / 1000;
 
+#if !HAVE_FUTIMES
+    // Without futimes (QNX 6.5), futime sets whole seconds
+    struct utimbuf updatedTime = { .actime = (time_t)times[0].tv_sec, .modtime = (time_t)times[1].tv_sec };
+    (void)updatedTimes;
+    while (CheckInterrupted(result = futime(ToFileDescriptor(fd), &updatedTime)));
+#else
     while (CheckInterrupted(result = futimes(ToFileDescriptor(fd), updatedTimes)));
+#endif
 #endif
 
     return result;
