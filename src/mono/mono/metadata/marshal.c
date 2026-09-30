@@ -3353,22 +3353,6 @@ mono_marshal_set_callconv_from_modopt (MonoMethod *method, MonoMethodSignature *
 	}
 }
 
-static MonoArray*
-mono_marshal_get_callconvs_array_from_attribute (MonoCustomAttrEntry *attr, CattrNamedArg **arginfo)
-{
-	HANDLE_FUNCTION_ENTER ();
-
-	ERROR_DECL (error);
-	MonoArrayHandleOut typed_args_h = MONO_HANDLE_NEW (MonoArray, NULL);
-	MonoArrayHandleOut named_args_h = MONO_HANDLE_NEW (MonoArray, NULL);
-	mono_reflection_create_custom_attr_data_args (mono_defaults.corlib, attr->ctor, attr->data, attr->data_size, typed_args_h, named_args_h, arginfo, error);
-	if (!is_ok (error)) {
-		mono_error_cleanup (error);
-	}
-
-	HANDLE_FUNCTION_RETURN_OBJ (named_args_h);
-}
-
 static void
 mono_marshal_set_callconv_from_unmanaged_callconv_attribute (MonoMethod *method, MonoMethodSignature *csig, gboolean *skip_gc_trans /*out*/)
 {
@@ -3394,26 +3378,32 @@ mono_marshal_set_callconv_from_unmanaged_callconv_attribute (MonoMethod *method,
 
 	if (attr != NULL)
 	{
-		CattrNamedArg *arginfo;
-		MonoArray *named_args = mono_marshal_get_callconvs_array_from_attribute(attr, &arginfo);
-		if (named_args)
-		{
-			for (mono_array_size_t i = 0; i < mono_array_length_internal(named_args); ++i) {
-				CattrNamedArg *info = &arginfo[i];
-				g_assert(info->field);
-				if (strcmp(info->field->name, "CallConvs") != 0)
+		/*
+		 * Decode the arguments without creating managed objects: an AOT
+		 * cross compiler lays out managed objects for the target, so on a
+		 * 64-bit host compiling for a 32-bit target the arrays the managed
+		 * decoder allocates were too small and corrupted the heap.
+		 */
+		ERROR_DECL (decode_error);
+		MonoDecodeCustomAttr *decoded = mono_reflection_create_custom_attr_data_args_noalloc (mono_defaults.corlib, attr->ctor, attr->data, attr->data_size, decode_error);
+		if (!is_ok (decode_error)) {
+			mono_error_cleanup (decode_error);
+		} else if (decoded) {
+			for (int i = 0; i < decoded->named_args_num; ++i) {
+				CattrNamedArg *info = &decoded->named_args_info [i];
+				g_assert (info->field);
+				if (strcmp (info->field->name, "CallConvs") != 0)
 					continue;
 
 				/* CallConvs is an array of types */
-				MonoArray *callconv_array = mono_array_get_internal(named_args, MonoArray *, i);
-				for (mono_array_size_t j = 0; j < mono_array_length_internal(callconv_array); ++j) {
-					MonoReflectionType *callconv_type = mono_array_get_internal(callconv_array, MonoReflectionType *, j);
-					mono_marshal_set_callconv_for_type(callconv_type->type, csig, skip_gc_trans);
-				}
+				MonoCustomAttrValue *callconvs = decoded->named_args [i];
+				if (callconvs->type != MONO_TYPE_SZARRAY || !callconvs->value.array)
+					continue;
+				for (int j = 0; j < callconvs->value.array->len; ++j)
+					mono_marshal_set_callconv_for_type ((MonoType*)callconvs->value.array->values [j].value.primitive, csig, skip_gc_trans);
 			}
+			mono_reflection_free_custom_attr_data_args_noalloc (decoded);
 		}
-
-		g_free (arginfo);
 	}
 
 	if (!cinfo->cached)
