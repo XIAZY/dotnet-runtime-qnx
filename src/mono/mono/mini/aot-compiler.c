@@ -213,6 +213,7 @@ typedef struct MonoAotOptions {
 	GList *direct_pinvokes;
 	GList *direct_pinvoke_lists;
 	gboolean direct_icalls;
+	gboolean native_wrappers;
 	gboolean direct_extern_calls;
 	gboolean no_direct_calls;
 	gboolean use_trampolines_page;
@@ -5379,8 +5380,14 @@ add_managed_to_native_wrappers (MonoAotCompile *acfg)
 	MonoMethod *method;
 	guint32 token;
 
-	if (!mono_aot_mode_is_full (&acfg->aot_opts) && !is_direct_pinvoke_enabled (acfg))
+	if (!mono_aot_mode_is_full (&acfg->aot_opts) && !is_direct_pinvoke_enabled (acfg) && !acfg->aot_opts.native_wrappers)
 		return;
+
+	/* Full AOT adds the JIT icall wrappers in add_full_aot_wrappers () */
+	if (acfg->aot_opts.native_wrappers && !mono_aot_mode_is_full (&acfg->aot_opts) && mono_is_corlib_image (acfg->image->assembly->image)) {
+		for (int i = 0; i < MONO_JIT_ICALL_count; ++i)
+			add_jit_icall_wrapper (acfg, mono_find_jit_icall_info ((MonoJitICallId)i));
+	}
 
 	/* pinvoke wrappers */
 	int rows = table_info_get_rows (&acfg->image->tables [MONO_TABLE_METHOD]);
@@ -5391,7 +5398,7 @@ add_managed_to_native_wrappers (MonoAotCompile *acfg)
 		report_loader_error (acfg, error, TRUE, "Failed to load method token 0x%x due to %s\n", i, mono_error_get_message (error));
 
 		if ((method->flags & METHOD_ATTRIBUTE_PINVOKE_IMPL) || (method->iflags & METHOD_IMPL_ATTRIBUTE_INTERNAL_CALL)) {
-			if (mono_aot_mode_is_full (&acfg->aot_opts) || is_direct_pinvoke_specified_for_method (acfg, method))
+			if (mono_aot_mode_is_full (&acfg->aot_opts) || acfg->aot_opts.native_wrappers || is_direct_pinvoke_specified_for_method (acfg, method))
 				add_method (acfg, mono_marshal_get_native_wrapper (method, TRUE, TRUE));
 		}
 
@@ -9048,6 +9055,8 @@ mono_aot_parse_options (const char *aot_options, MonoAotOptions *opts)
 			opts->direct_pinvoke = TRUE;
 		} else if (str_begins_with (arg, "direct-icalls")) {
 			opts->direct_icalls = TRUE;
+		} else if (str_begins_with (arg, "native-wrappers")) {
+			opts->native_wrappers = TRUE;
 		} else if (str_begins_with (arg, "direct-extern-calls")) {
 			opts->direct_extern_calls = TRUE;
 		} else if (str_begins_with (arg, "no-direct-calls")) {
@@ -9180,6 +9189,7 @@ mono_aot_parse_options (const char *aot_options, MonoAotOptions *opts)
 			printf ("    direct-pinvokes=<string>             - Specific direct pinvokes to generate direct calls for an entire 'module' or specific 'module!entrypoint' separated by semi-colons. Incompatible with 'direct-pinvoke' option.\n");
 			printf ("    direct-pinvoke-lists=<string>        - Files containing specific direct pinvokes to generate direct calls for an entire 'module' or specific 'module!entrypoint' on separate lines. Incompatible with 'direct-pinvoke' option.\n");
 			printf ("    direct-pinvoke                       - Generate direct calls for all direct pinvokes encountered in the managed assembly.\n");
+			printf ("    native-wrappers                      - Outside full AOT, also compile the pinvoke, internal call and JIT icall wrappers, which are otherwise JIT compiled.\n");
 			printf ("    dwarfdebug                           - \n");
 			printf ("    full                                 - \n");
 			printf ("    hybrid                               - \n");
