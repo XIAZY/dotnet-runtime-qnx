@@ -313,6 +313,8 @@ DECL_OFFSET(CallContext, edx)
 DECL_OFFSET(CallContext, fret)
 DECL_OFFSET(CallContext, stack_size)
 DECL_OFFSET(CallContext, stack)
+DECL_OFFSET(CallContext, callee_stack_pop)
+DECL_OFFSET(CallContext, ret_on_fpstack)
 #endif
 
 #if defined(TARGET_RISCV)
