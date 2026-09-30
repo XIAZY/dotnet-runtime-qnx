@@ -105,6 +105,12 @@ if (CLR_CMAKE_TARGET_UNIX OR CLR_CMAKE_TARGET_BROWSER OR CLR_CMAKE_TARGET_WASI)
     if (CLR_CMAKE_TARGET_LINUX OR CLR_CMAKE_TARGET_HAIKU)
         set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -D_GNU_SOURCE")
     endif ()
+
+    if (CLR_CMAKE_TARGET_QNX)
+        # stat64, lseek64 and the other 64-bit file functions are declared only with
+        # _LARGEFILE64_SOURCE, which QNX defines by itself only in its default mode.
+        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -D_LARGEFILE64_SOURCE=1")
+    endif ()
 else ()
     set(CMAKE_SHARED_LIBRARY_PREFIX "")
     add_subdirectory(System.Globalization.Native)
@@ -115,7 +121,7 @@ add_subdirectory(System.IO.Compression.Native)
 if (CLR_CMAKE_TARGET_UNIX OR CLR_CMAKE_TARGET_BROWSER OR CLR_CMAKE_TARGET_WASI)
     include(configure.cmake)
 
-    if (NOT CLR_CMAKE_TARGET_BROWSER AND NOT CLR_CMAKE_TARGET_WASI AND NOT CLR_CMAKE_TARGET_IOS AND NOT CLR_CMAKE_TARGET_TVOS)
+    if (NOT CLR_CMAKE_TARGET_BROWSER AND NOT CLR_CMAKE_TARGET_WASI AND NOT CLR_CMAKE_TARGET_IOS AND NOT CLR_CMAKE_TARGET_TVOS AND NOT CLR_CMAKE_TARGET_QNX)
         add_subdirectory(System.IO.Ports.Native)
     endif ()
 
@@ -146,6 +152,11 @@ if (CLR_CMAKE_TARGET_UNIX OR CLR_CMAKE_TARGET_BROWSER OR CLR_CMAKE_TARGET_WASI)
     endif ()
 
     add_subdirectory(System.Native)
+    if (CLR_CMAKE_TARGET_QNX)
+        # QNX 6.5 has no ICU, GSSAPI or current OpenSSL: globalization runs in
+        # invariant mode, and only System.Native and compression are built.
+        return()
+    endif ()
     add_subdirectory(System.Globalization.Native)
 
     if (CLR_CMAKE_TARGET_BROWSER OR CLR_CMAKE_TARGET_WASI)
