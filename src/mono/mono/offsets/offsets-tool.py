@@ -161,6 +161,23 @@ class OffsetsTool:
 			self.target = Target ("TARGET_X86", None, LINUX_DEFINES)
 			self.target_args += ["--target=i686-linux-gnu"]
 			self.target_args += ["--sysroot", args.sysroot]
+		elif "i686-pc-nto-qnx6.5.0" == args.abi:
+			# QNX Neutrino 6.5 x86, with its headers from --sysroot (a QNX 6.5.0
+			# rootfs, see eng/native/qnx/build-rootfs.sh: usr/include and gcc's
+			# include directory under usr/lib/gcc). clang has
+			# no QNX target, so this is its i386 Linux driver with QNX's
+			# predefines and headers, as the QNX cross toolchain uses it. QNX's
+			# 64-bit types are 8-byte aligned, unlike Linux x86's.
+			require_sysroot (args)
+			self.target = Target ("TARGET_X86", "TARGET_QNX", ["HOST_QNX", "MONO_CROSS_COMPILE", "USE_MONO_CTX"])
+			self.target_args += ["--target=i386-pc-linux-gnu", "-march=i686", "-nostdinc"]
+			self.target_args += ["-D__QNX__", "-D__QNXNTO__", "-D__unix__", "-D__unix", "-D__ELF__", "-D__X86__",
+								 "-D__i386__", "-D__LITTLEENDIAN__", "-D__LANGUAGE_C", "-D_LANGUAGE_C"]
+			if args.prefixes:
+				for prefix in args.prefixes:
+					self.target_args += ["-isystem", prefix + "/include"]
+			self.target_args += ["-isystem", args.sysroot + "/usr/lib/gcc/i486-pc-nto-qnx6.5.0/4.4.2/include"]
+			self.target_args += ["-isystem", args.sysroot + "/usr/include"]
 		elif "aarch64-linux-gnu" == args.abi:
 			require_sysroot (args)
 			self.target = Target ("TARGET_ARM64", None, LINUX_DEFINES)
