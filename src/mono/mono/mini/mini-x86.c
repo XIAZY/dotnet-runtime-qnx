@@ -661,6 +661,96 @@ mono_arch_set_native_call_context_args (CallContext *ccontext, gpointer frame, M
 	}
 }
 
+/* Gets the arguments from ccontext (for n2i entry) */
+gpointer
+mono_arch_get_native_call_context_args (CallContext *ccontext, gpointer frame, MonoMethodSignature *sig, gpointer call_info)
+{
+	const MonoEECallbacks *interp_cb = mini_get_interp_callbacks ();
+	CallInfo *cinfo = (CallInfo*)call_info;
+	gpointer storage;
+
+	/* Every argument is on the stack; ccontext->stack points at the first. */
+	for (guint i = 0; i < sig->param_count + sig->hasthis; i++) {
+		ArgInfo *ainfo = &cinfo->args [i];
+
+		g_assert (ainfo->storage == ArgOnStack);
+		storage = arg_get_storage (ccontext, ainfo);
+		interp_cb->data_to_frame_arg ((MonoInterpFrameHandle)frame, sig, i, storage);
+	}
+
+	/* The callee pops the hidden address of a struct returned in memory, if any. */
+	g_assert (cinfo->callee_stack_pop == 0 || cinfo->callee_stack_pop == 4);
+	ccontext->callee_stack_pop = cinfo->callee_stack_pop;
+	ccontext->ret_on_fpstack = 0;
+
+	storage = NULL;
+	if (sig->ret->type != MONO_TYPE_VOID && cinfo->vtype_retaddr)
+		storage = *(gpointer*)(ccontext->stack + cinfo->ret.offset);
+
+	return storage;
+}
+
+/* Sets the return value in ccontext (for n2i return) */
+void
+mono_arch_set_native_call_context_ret (CallContext *ccontext, gpointer frame, MonoMethodSignature *sig, gpointer call_info, gpointer retp)
+{
+	const MonoEECallbacks *interp_cb;
+	CallInfo *cinfo = (CallInfo*)call_info;
+	ArgInfo *ainfo;
+
+	if (sig->ret->type == MONO_TYPE_VOID)
+		return;
+
+	interp_cb = mini_get_interp_callbacks ();
+	ainfo = &cinfo->ret;
+
+	if (retp) {
+		g_assert (cinfo->vtype_retaddr);
+		interp_cb->frame_arg_to_data ((MonoInterpFrameHandle)frame, sig, -1, retp);
+		/* The address of a struct returned in memory is also returned in EAX. */
+		ccontext->eax = (host_mgreg_t)(gsize)retp;
+		return;
+	}
+
+	switch (ainfo->storage) {
+	case ArgOnDoubleFpStack:
+		interp_cb->frame_arg_to_data ((MonoInterpFrameHandle)frame, sig, -1, &ccontext->fret);
+		ccontext->ret_on_fpstack = 1;
+		break;
+	case ArgOnFloatFpStack: {
+		float value;
+
+		interp_cb->frame_arg_to_data ((MonoInterpFrameHandle)frame, sig, -1, &value);
+		ccontext->fret = value;
+		ccontext->ret_on_fpstack = 1;
+		break;
+	}
+	case ArgInIReg:
+	case ArgValuetypeInReg: {
+		MonoType *ret_type = mini_get_underlying_type (sig->ret);
+
+		/*
+		 * EAX, or the EDX:EAX pair, which are adjacent in CallContext. The value
+		 * may be narrower than the registers (a bool is written as one byte):
+		 * clear them first, and sign-extend signed small integers, so the caller
+		 * finds the whole register set as a native return leaves it.
+		 */
+		ccontext->eax = 0;
+		ccontext->edx = 0;
+		interp_cb->frame_arg_to_data ((MonoInterpFrameHandle)frame, sig, -1, &ccontext->eax);
+		if (!m_type_is_byref (ret_type)) {
+			if (ret_type->type == MONO_TYPE_I1)
+				ccontext->eax = (host_mgreg_t)(gint32)(gint8)ccontext->eax;
+			else if (ret_type->type == MONO_TYPE_I2)
+				ccontext->eax = (host_mgreg_t)(gint32)(gint16)ccontext->eax;
+		}
+		break;
+	}
+	default:
+		g_error ("Arg storage type not yet supported");
+	}
+}
+
 void
 mono_arch_get_native_call_context_ret (CallContext *ccontext, gpointer frame, MonoMethodSignature *sig, gpointer call_info)
 {
