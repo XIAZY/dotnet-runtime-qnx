@@ -20,6 +20,13 @@
 #elif defined(__HAIKU__)
 #include <FindDirectory.h>
 #include <StorageDefs.h>
+#elif defined(__QNXNTO__)
+#include <devctl.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/procfs.h>
+#include <unistd.h>
 #elif HAVE_GETAUXVAL
 #include <sys/auxv.h>
 #endif
@@ -86,6 +93,31 @@ static inline char* minipal_getexepath(void)
 #elif defined(TARGET_WASM)
     // This is a packaging convention that our tooling should enforce.
     return strdup("/managed");
+#elif defined(__QNXNTO__)
+    // QNX has no /proc/self/exe; the process manager reports the path of the
+    // executable (without its leading '/').
+    struct
+    {
+        procfs_debuginfo info;
+        char path[PATH_MAX];
+    } map;
+    char path[PATH_MAX + 1];
+    int fd = open("/proc/self/as", O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+    {
+        return NULL;
+    }
+    memset(&map, 0, sizeof(map));
+    int err = devctl(fd, DCMD_PROC_MAPDEBUG_BASE, &map, sizeof(map), NULL);
+    close(fd);
+    if (err != EOK || map.info.path[0] == '\0')
+    {
+        return NULL;
+    }
+    // A program started by a relative path is reported as it was given
+    // ("./bin/app"), relative to the working directory at startup.
+    snprintf(path, sizeof(path), "%s%s", map.info.path[0] == '/' || map.info.path[0] == '.' ? "" : "/", map.info.path);
+    return realpath(path, NULL);
 #else
 #ifdef __linux__
     const char* symlinkEntrypointExecutable = "/proc/self/exe";
