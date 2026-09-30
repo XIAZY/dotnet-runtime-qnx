@@ -1711,6 +1711,39 @@ int32_t SystemNative_SendMessage(intptr_t socket, MessageHeader* messageHeader, 
     return SystemNative_ConvertErrorPlatformToPal(errno);
 }
 
+#if defined(__QNXNTO__)
+// QNX's io-pkt reports AF_UNIX addresses at nearly their full size: 106
+// bytes (sizeof(struct sockaddr_un)) for an unnamed peer and 105 for a bound
+// path, where Linux reports the family alone (2) or the family, the path and
+// its NUL. .NET sizes its buffers for the address it expects, so an accept()
+// from an unnamed client overran them. This trims the length to what Linux
+// reports, and never beyond the caller's buffer (io-pkt reports the full size
+// even when it truncated). Measured on QNX 6.5.0; io-pkt also drops a bound
+// path's leading '/', which is left as it is.
+static void QnxTrimUnixAddressLength(const uint8_t* address, socklen_t bufferLength, socklen_t* length)
+{
+    const size_t pathOffset = offsetof(struct sockaddr_un, sun_path);
+
+    if (*length > bufferLength)
+    {
+        *length = bufferLength;
+    }
+    if (*length <= pathOffset || ((const struct sockaddr_un*)address)->sun_family != AF_UNIX)
+    {
+        return;
+    }
+
+    const char* path = (const char*)address + pathOffset;
+    const char* end = memchr(path, '\0', *length - pathOffset);
+    size_t pathLength = end != NULL ? (size_t)(end - path) : *length - pathOffset;
+    *length = (socklen_t)(pathOffset + (pathLength > 0 ? pathLength + 1 : 0));
+    if (*length > bufferLength)
+    {
+        *length = bufferLength;
+    }
+}
+#endif
+
 int32_t SystemNative_Accept(intptr_t socket, uint8_t* socketAddress, int32_t* socketAddressLen, intptr_t* acceptedSocket)
 {
     if (socketAddress == NULL || socketAddressLen == NULL || acceptedSocket == NULL || *socketAddressLen < 0)
@@ -1761,6 +1794,9 @@ int32_t SystemNative_Accept(intptr_t socket, uint8_t* socketAddress, int32_t* so
         return SystemNative_ConvertErrorPlatformToPal(errno);
     }
 
+#if defined(__QNXNTO__)
+    QnxTrimUnixAddressLength(socketAddress, (socklen_t)*socketAddressLen, &addrLen);
+#endif
     assert(addrLen <= (socklen_t)*socketAddressLen);
     *socketAddressLen = (int32_t)addrLen;
     *acceptedSocket = accepted;
@@ -1877,6 +1913,9 @@ int32_t SystemNative_GetPeerName(intptr_t socket, uint8_t* socketAddress, int32_
     {
         return SystemNative_ConvertErrorPlatformToPal(errno);
     }
+#if defined(__QNXNTO__)
+    QnxTrimUnixAddressLength(socketAddress, (socklen_t)*socketAddressLen, &addrLen);
+#endif
 
     *socketAddressLen = (int32_t)addrLen;
     return Error_SUCCESS;
@@ -1897,6 +1936,9 @@ int32_t SystemNative_GetSockName(intptr_t socket, uint8_t* socketAddress, int32_
     {
         return SystemNative_ConvertErrorPlatformToPal(errno);
     }
+#if defined(__QNXNTO__)
+    QnxTrimUnixAddressLength(socketAddress, (socklen_t)*socketAddressLen, &addrLen);
+#endif
 
     assert(addrLen <= (socklen_t)*socketAddressLen);
     *socketAddressLen = (int32_t)addrLen;
