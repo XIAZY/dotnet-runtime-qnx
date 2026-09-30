@@ -56,6 +56,11 @@
 // SunOS has getdomainname in libnsl but no header declaration
 extern int getdomainname(char *name, int namelen);
 #endif
+#include <sys/uio.h>
+#if !defined(IOV_MAX) && defined(UIO_MAXIOV)
+// QNX's <limits.h> leaves IOV_MAX undefined; its limit is UIO_MAXIOV.
+#define IOV_MAX UIO_MAXIOV
+#endif
 #ifdef HAVE_PWD_H
 #include <pwd.h>
 #endif
