@@ -398,7 +398,18 @@ int32_t SystemNative_ForkAndExecProcess(const char* filename,
                 }
             }
         }
+#if defined(__QNXNTO__)
+        // On QNX the launcher blocks the asynchronous signals (SIGINT, SIGTERM, ...) in every
+        // thread but its own signal thread, because QNX 6.5 cannot restart interrupted calls.
+        // The calling thread's mask is that confinement mask, not a choice the child should
+        // inherit, so the child starts with no signal blocked. (A separate set: after vfork the
+        // child shares the parent's memory, and the parent restores its mask from old_signal_set.)
+        sigset_t child_signal_set;
+        sigemptyset(&child_signal_set);
+        pthread_sigmask(SIG_SETMASK, &child_signal_set, &junk_signal_set);
+#else
         pthread_sigmask(SIG_SETMASK, &old_signal_set, &junk_signal_set); // Not all architectures allow NULL here
+#endif
 
         // For any redirections that should happen, dup the pipe descriptors onto stdin/out/err.
         // We don't need to explicitly close out the old pipe descriptors as they will be closed on the 'execve' call.
