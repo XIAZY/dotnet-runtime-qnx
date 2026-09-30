@@ -2662,20 +2662,30 @@ static const size_t HandleEventBufferElementSize = 0;
 
 static int32_t CloseHandleEventPortInner(int32_t port)
 {
+    (void)port;
     return Error_ENOSYS;
 }
 static int32_t CreateHandleEventPortInner(int32_t* port)
 {
+    (void)port;
     return Error_ENOSYS;
 }
 static int32_t TryChangeHandleEventRegistrationInner(
     int32_t port, int32_t socket, HandleEvents currentEvents, HandleEvents newEvents,
 uintptr_t data)
 {
+    (void)port;
+    (void)socket;
+    (void)currentEvents;
+    (void)newEvents;
+    (void)data;
     return Error_ENOSYS;
 }
 static int32_t WaitForHandleEventsInner(int32_t port, HandleEvent* buffer, int32_t* count)
 {
+    (void)port;
+    (void)buffer;
+    (void)count;
     return Error_ENOSYS;
 }
 #endif  // !HAVE_KQUEUE !HAVE_EPOLL
