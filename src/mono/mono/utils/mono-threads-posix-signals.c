@@ -18,6 +18,12 @@
 #include <errno.h>
 #include <mono/utils/mono-errno.h>
 #include <signal.h>
+#include <mono/utils/mono-signal-qnx.h>
+
+#if defined(HOST_QNX) && !defined(SA_RESTART)
+/* QNX 6.5 cannot restart interrupted calls (signal.h: "not supported yet"). */
+#define SA_RESTART 0
+#endif
 
 #ifdef HAVE_ANDROID_LEGACY_SIGNAL_INLINES_H
 #include <android/legacy_signal_inlines.h>
@@ -61,6 +67,9 @@ signal_add_handler (int signo, void (*handler)(int, siginfo_t *, void *), int fl
 	sa.sa_sigaction = handler;
 	sigfillset (&sa.sa_mask);
 	sa.sa_flags = SA_SIGINFO | flags;
+#ifdef HOST_QNX
+	mono_qnx_wrap_signal_handler (signo, &sa);
+#endif
 	ret = sigaction (signo, &sa, NULL);
 	g_assert (ret != -1);
 }

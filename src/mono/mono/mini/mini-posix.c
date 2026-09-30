@@ -14,6 +14,12 @@
  */
 #include <config.h>
 #include <signal.h>
+#include <mono/utils/mono-signal-qnx.h>
+
+#if defined(HOST_QNX) && !defined(SA_RESTART)
+/* QNX 6.5 cannot restart interrupted calls (signal.h: "not supported yet"). */
+#define SA_RESTART 0
+#endif
 #ifdef HAVE_ALLOCA_H
 #include <alloca.h>
 #endif
@@ -370,6 +376,9 @@ add_signal_handler (int signo, MonoSignalHandler handler, int flags)
 	sa.sa_handler = (void (*)(int))handler;
 	sigemptyset (&sa.sa_mask);
 	sa.sa_flags = flags;
+#endif
+#ifdef HOST_QNX
+	mono_qnx_wrap_signal_handler (signo, &sa);
 #endif
 	g_assert (sigaction (signo, &sa, &previous_sa) != -1);
 
