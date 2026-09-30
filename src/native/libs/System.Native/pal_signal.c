@@ -17,6 +17,11 @@
 
 #include <minipal/thread.h>
 
+#if defined(__QNXNTO__) && !defined(SA_RESTART)
+// QNX 6.5 cannot restart interrupted calls (signal.h: "not supported yet").
+#define SA_RESTART 0
+#endif
+
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 
 // Saved signal handlers
@@ -419,6 +424,51 @@ static void CloseSignalHandlingPipe(void)
     g_signalPipe[1] = -1;
 }
 
+#if defined(__QNXNTO__) && defined(__i386__)
+// QNX 6.5 does not reliably preserve the interrupted code's FPU/SSE
+// registers around a signal handler (measured on QNX 6.5.0 x86: a handler
+// that writes xmm registers changed the interrupted code's values in 4 runs
+// in 10). This library is built with SSE2, so its handler is entered through
+// a trampoline, in assembly so that no compiler-generated code runs first,
+// that saves the state with fxsave and restores it with fxrstor. The fxsave
+// area is 512 bytes and 16-byte aligned; QNX aligns the stack to 4 bytes.
+__attribute__((visibility("hidden"))) void SystemNative_QnxSignalEntry(int sig, siginfo_t* siginfo, void* context);
+__attribute__((visibility("hidden"))) void SystemNative_QnxSignalTrampoline(int sig, siginfo_t* siginfo, void* context);
+
+void SystemNative_QnxSignalEntry(int sig, siginfo_t* siginfo, void* context)
+{
+    SignalHandler(sig, siginfo, context);
+}
+
+__asm__(
+    ".text\n"
+    ".p2align 4\n"
+    ".globl SystemNative_QnxSignalTrampoline\n"
+    ".hidden SystemNative_QnxSignalTrampoline\n"
+    ".type SystemNative_QnxSignalTrampoline, @function\n"
+    "SystemNative_QnxSignalTrampoline:\n"
+    "    pushl %ebp\n"
+    "    movl %esp, %ebp\n"
+    "    subl $524, %esp\n"
+    "    andl $-16, %esp\n"
+    "    fxsave (%esp)\n"
+    "    subl $16, %esp\n"
+    "    movl 8(%ebp), %eax\n"
+    "    movl %eax, 0(%esp)\n"
+    "    movl 12(%ebp), %eax\n"
+    "    movl %eax, 4(%esp)\n"
+    "    movl 16(%ebp), %eax\n"
+    "    movl %eax, 8(%esp)\n"
+    "    call SystemNative_QnxSignalEntry\n"
+    "    addl $16, %esp\n"
+    "    fxrstor (%esp)\n"
+    "    movl %ebp, %esp\n"
+    "    popl %ebp\n"
+    "    ret\n"
+    ".size SystemNative_QnxSignalTrampoline, .-SystemNative_QnxSignalTrampoline\n"
+);
+#endif
+
 static bool InstallSignalHandler(int sig, int flags)
 {
     int rv;
@@ -461,7 +511,11 @@ static bool InstallSignalHandler(int sig, int flags)
     }
     newAction.sa_flags |= flags | SA_SIGINFO;
 #pragma clang diagnostic pop
+#if defined(__QNXNTO__) && defined(__i386__)
+    newAction.sa_sigaction = &SystemNative_QnxSignalTrampoline;
+#else
     newAction.sa_sigaction = &SignalHandler;
+#endif
 
     rv = sigaction(sig, &newAction, orig);
     if (rv != 0)
