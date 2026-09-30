@@ -1520,6 +1520,7 @@ int32_t SystemNative_Receive(intptr_t socket, void* buffer, int32_t bufferLen, i
     }
 
     *received = 0;
+    QNX_ARM_ON_ERROR(fd, SocketEvents_SA_READ);
     return SystemNative_ConvertErrorPlatformToPal(errno);
 }
 
@@ -1623,6 +1624,7 @@ int32_t SystemNative_ReceiveMessage(intptr_t socket, MessageHeader* messageHeade
     }
 
     *received = 0;
+    QNX_ARM_ON_ERROR(fd, SocketEvents_SA_READ);
     return SystemNative_ConvertErrorPlatformToPal(errno);
 }
 
@@ -1658,6 +1660,7 @@ int32_t SystemNative_Send(intptr_t socket, void* buffer, int32_t bufferLen, int3
     }
 
     *sent = 0;
+    QNX_ARM_ON_ERROR(fd, SocketEvents_SA_WRITE);
     return SystemNative_ConvertErrorPlatformToPal(errno);
 }
 
@@ -1704,6 +1707,7 @@ int32_t SystemNative_SendMessage(intptr_t socket, MessageHeader* messageHeader, 
     }
 
     *sent = 0;
+    QNX_ARM_ON_ERROR(fd, SocketEvents_SA_WRITE);
     return SystemNative_ConvertErrorPlatformToPal(errno);
 }
 
@@ -1753,6 +1757,7 @@ int32_t SystemNative_Accept(intptr_t socket, uint8_t* socketAddress, int32_t* so
     if (accepted == -1)
     {
         *acceptedSocket = -1;
+        QNX_ARM_ON_ERROR(fd, SocketEvents_SA_READ);
         return SystemNative_ConvertErrorPlatformToPal(errno);
     }
 
@@ -1798,6 +1803,10 @@ int32_t SystemNative_Connect(intptr_t socket, uint8_t* socketAddress, int32_t so
 
     int err;
     while ((err = connect(fd, (struct sockaddr*)socketAddress, (socklen_t)socketAddressLen)) < 0 && errno == EINTR);
+    if (err != 0)
+    {
+        QNX_ARM_ON_ERROR(fd, SocketEvents_SA_WRITE);
+    }
     return err == 0 ? Error_SUCCESS : SystemNative_ConvertErrorPlatformToPal(errno);
 }
 
@@ -3399,6 +3408,361 @@ static int32_t WaitForSocketEventsInner(int32_t port, SocketEvent* buffer, int32
     return Error_SUCCESS;
 }
 
+#elif defined(__QNXNTO__)
+
+// QNX Neutrino has neither epoll nor kqueue. The port is a channel that
+// receives pulses: ionotify() arms a descriptor with a pulse, and the pulse
+// is delivered when the descriptor becomes ready. .NET registers a
+// descriptor once and expects an event whenever it becomes ready again
+// after an operation found it not ready, so the descriptor is armed at that
+// moment: when a read, write, receive, send or accept returns EAGAIN, or a
+// connect EINPROGRESS (QnxSocketEventPortArmOnError, called by those
+// shims). Arming uses _NOTIFY_ACTION_POLLARM, the action libc's select()
+// and poll() use; if the descriptor is ready by then, the event is posted
+// at once. Measured on QNX 6.5.0: POLLARM arms for input and for output coexist on one
+// descriptor and with other processes' select() and poll() on the same
+// file, whereas _NOTIFY_ACTION_TRANARM fails with EBUSY when another process
+// is already waiting in select(). Registering posts one event for each
+// direction, since nothing is armed until an operation meets EAGAIN.
+//
+// A pulse's value is the descriptor and a registration sequence number, so
+// that pulses from an earlier registration of the same descriptor number are
+// recognised and dropped.
+
+#include <pthread.h>
+#include <sys/iomgr.h>
+#include <sys/neutrino.h>
+
+static const size_t SocketEventBufferElementSize = sizeof(SocketEvent);
+
+enum
+{
+    QnxPulseRead = _PULSE_CODE_MINAVAIL + 1,
+    QnxPulseWrite = _PULSE_CODE_MINAVAIL + 2,
+    QnxMaxPorts = 64,
+    QnxMaxDescriptor = (1 << 23) - 1, // the descriptor takes the top 23 bits of a pulse value
+};
+
+typedef struct
+{
+    int32_t Channel;
+    int32_t Connection;
+} QnxPort;
+
+typedef struct
+{
+    int32_t Channel;    // the port's channel
+    int32_t Connection; // a connection to it, for the pulses
+    uintptr_t Data;     // the engine's data for this descriptor
+    uint32_t Sequence;  // incremented on every registration change
+    bool Registered;
+} QnxRegistration;
+
+// Locking: g_qnxLock guards g_qnxPorts and g_qnxRegistrations (the table
+// grows with realloc, so no pointer into it is kept after unlocking). The
+// engine thread takes it for each pulse; I/O threads take it only on the
+// EAGAIN path of a shim, and for registration and close. It is never held
+// across a kernel call that can block (ionotify, MsgSendPulse and
+// MsgReceivePulse all run after unlocking).
+static pthread_mutex_t g_qnxLock = PTHREAD_MUTEX_INITIALIZER;
+static QnxPort g_qnxPorts[QnxMaxPorts];
+static QnxRegistration* g_qnxRegistrations;
+static int32_t g_qnxRegistrationCount;
+
+static int QnxPulseValue(int fd, uint32_t sequence)
+{
+    return (int)(((uint32_t)fd << 8) | (sequence & 0xFF));
+}
+
+// The connection to a port's channel, or -1. Called with g_qnxLock held.
+static int32_t QnxPortConnection(int32_t channel)
+{
+    for (int i = 0; i < QnxMaxPorts; i++)
+    {
+        if (g_qnxPorts[i].Connection > 0 && g_qnxPorts[i].Channel == channel)
+        {
+            return g_qnxPorts[i].Connection;
+        }
+    }
+    return -1;
+}
+
+static int32_t CreateSocketEventPortInner(int32_t* port)
+{
+    // Fixed priority: a pulse must not change the waiting thread's priority.
+    int channel = ChannelCreate(_NTO_CHF_FIXED_PRIORITY);
+    if (channel == -1)
+    {
+        *port = -1;
+        return SystemNative_ConvertErrorPlatformToPal(errno);
+    }
+
+    int connection = ConnectAttach(0, 0, channel, _NTO_SIDE_CHANNEL, 0);
+    if (connection == -1)
+    {
+        int error = errno;
+        ChannelDestroy(channel);
+        *port = -1;
+        return SystemNative_ConvertErrorPlatformToPal(error);
+    }
+
+    pthread_mutex_lock(&g_qnxLock);
+    int slot = -1;
+    for (int i = 0; i < QnxMaxPorts && slot == -1; i++)
+    {
+        if (g_qnxPorts[i].Connection <= 0)
+        {
+            slot = i;
+        }
+    }
+    if (slot != -1)
+    {
+        g_qnxPorts[slot].Channel = channel;
+        g_qnxPorts[slot].Connection = connection;
+    }
+    pthread_mutex_unlock(&g_qnxLock);
+
+    if (slot == -1)
+    {
+        ConnectDetach(connection);
+        ChannelDestroy(channel);
+        *port = -1;
+        return Error_EMFILE;
+    }
+
+    *port = channel;
+    return Error_SUCCESS;
+}
+
+static int32_t CloseSocketEventPortInner(int32_t port)
+{
+    int32_t connection = -1;
+
+    pthread_mutex_lock(&g_qnxLock);
+    for (int i = 0; i < QnxMaxPorts; i++)
+    {
+        if (g_qnxPorts[i].Connection > 0 && g_qnxPorts[i].Channel == port)
+        {
+            connection = g_qnxPorts[i].Connection;
+            g_qnxPorts[i].Connection = 0;
+        }
+    }
+    pthread_mutex_unlock(&g_qnxLock);
+
+    if (connection == -1)
+    {
+        return Error_EINVAL;
+    }
+    ConnectDetach(connection);
+    return ChannelDestroy(port) == 0 ? Error_SUCCESS : SystemNative_ConvertErrorPlatformToPal(errno);
+}
+
+// Makes room for descriptor fd in the registration table. Called with g_qnxLock held.
+static bool QnxReserve(int fd)
+{
+    if (fd < g_qnxRegistrationCount)
+    {
+        return true;
+    }
+
+    int32_t count = g_qnxRegistrationCount == 0 ? 256 : g_qnxRegistrationCount;
+    while (count <= fd)
+    {
+        count *= 2;
+    }
+    QnxRegistration* grown = (QnxRegistration*)realloc(g_qnxRegistrations, (size_t)count * sizeof(QnxRegistration));
+    if (grown == NULL)
+    {
+        return false;
+    }
+    memset(grown + g_qnxRegistrationCount, 0, (size_t)(count - g_qnxRegistrationCount) * sizeof(QnxRegistration));
+    g_qnxRegistrations = grown;
+    g_qnxRegistrationCount = count;
+    return true;
+}
+
+static int32_t TryChangeSocketEventRegistrationInner(
+    int32_t port, int32_t socket, SocketEvents currentEvents, SocketEvents newEvents, uintptr_t data)
+{
+    (void)currentEvents;
+
+    if (socket < 0 || socket > QnxMaxDescriptor)
+    {
+        return Error_EBADF;
+    }
+
+    pthread_mutex_lock(&g_qnxLock);
+    int32_t connection = QnxPortConnection(port);
+    if (connection == -1)
+    {
+        pthread_mutex_unlock(&g_qnxLock);
+        return Error_EINVAL;
+    }
+
+    if (newEvents == SocketEvents_SA_NONE)
+    {
+        if (socket < g_qnxRegistrationCount && g_qnxRegistrations[socket].Registered)
+        {
+            QnxRegistration* registration = &g_qnxRegistrations[socket];
+            registration->Registered = false;
+            registration->Sequence++;
+            pthread_mutex_unlock(&g_qnxLock);
+
+            // Disarm whatever is armed (POLL disarms and never arms).
+            struct sigevent event;
+            SIGEV_PULSE_INIT(&event, connection, SIGEV_PULSE_PRIO_INHERIT, QnxPulseRead, 0);
+            ionotify(socket, _NOTIFY_ACTION_POLL, _NOTIFY_COND_INPUT | _NOTIFY_COND_OUTPUT, &event);
+            return Error_SUCCESS;
+        }
+        pthread_mutex_unlock(&g_qnxLock);
+        return Error_SUCCESS;
+    }
+
+    if (!QnxReserve(socket))
+    {
+        pthread_mutex_unlock(&g_qnxLock);
+        return Error_ENOMEM;
+    }
+    QnxRegistration* registration = &g_qnxRegistrations[socket];
+    registration->Channel = port;
+    registration->Connection = connection;
+    registration->Data = data;
+    registration->Sequence++;
+    registration->Registered = true;
+    int value = QnxPulseValue(socket, registration->Sequence);
+    pthread_mutex_unlock(&g_qnxLock);
+
+    // Nothing is armed until an operation meets EAGAIN, and the descriptor may
+    // be ready already: report both directions once.
+    if ((newEvents & SocketEvents_SA_READ) != 0)
+    {
+        MsgSendPulse(connection, -1, QnxPulseRead, value);
+    }
+    if ((newEvents & SocketEvents_SA_WRITE) != 0)
+    {
+        MsgSendPulse(connection, -1, QnxPulseWrite, value);
+    }
+    return Error_SUCCESS;
+}
+
+void QnxSocketEventPortForget(int fd)
+{
+    pthread_mutex_lock(&g_qnxLock);
+    if (fd >= 0 && fd < g_qnxRegistrationCount && g_qnxRegistrations[fd].Registered)
+    {
+        // Pulses already queued for it no longer match the sequence and are dropped;
+        // closing the descriptor removes its arms.
+        g_qnxRegistrations[fd].Registered = false;
+        g_qnxRegistrations[fd].Sequence++;
+    }
+    pthread_mutex_unlock(&g_qnxLock);
+}
+
+void QnxSocketEventPortArmOnError(int fd, int32_t events)
+{
+    int savedErrno = errno;
+    if (savedErrno != EAGAIN && savedErrno != EWOULDBLOCK && savedErrno != EINPROGRESS)
+    {
+        return;
+    }
+
+    pthread_mutex_lock(&g_qnxLock);
+    if (fd < 0 || fd >= g_qnxRegistrationCount || !g_qnxRegistrations[fd].Registered)
+    {
+        pthread_mutex_unlock(&g_qnxLock);
+        return;
+    }
+    int32_t connection = g_qnxRegistrations[fd].Connection;
+    int value = QnxPulseValue(fd, g_qnxRegistrations[fd].Sequence);
+    pthread_mutex_unlock(&g_qnxLock);
+
+    bool read = (events & SocketEvents_SA_READ) != 0;
+    int condition = read ? _NOTIFY_COND_INPUT : _NOTIFY_COND_OUTPUT;
+    int code = read ? QnxPulseRead : QnxPulseWrite;
+    struct sigevent event;
+    SIGEV_PULSE_INIT(&event, connection, SIGEV_PULSE_PRIO_INHERIT, code, value);
+
+    // POLLARM arms only if the condition is not met yet, and returns the
+    // conditions that are. If it is met, report it now: the engine retries
+    // the operation. If arming failed (a closed descriptor, or a resource
+    // manager without notification support), report it too, so that the
+    // engine retries and meets the real result instead of waiting forever;
+    // the short delay keeps a descriptor that can never be armed from
+    // spinning the engine (at most about a thousand retries a second).
+    int result = ionotify(fd, _NOTIFY_ACTION_POLLARM, condition, &event);
+    if (result == -1)
+    {
+        struct timespec delay = { 0, 1000000 };
+        nanosleep(&delay, NULL);
+    }
+    if (result == -1 || (result & condition) != 0)
+    {
+        MsgSendPulse(connection, -1, code, value);
+    }
+    errno = savedErrno;
+}
+
+// Converts a pulse to an event, or returns false for a stale or foreign pulse.
+static bool QnxEventFromPulse(int32_t port, const struct _pulse* pulse, SocketEvent* event)
+{
+    if (pulse->code != QnxPulseRead && pulse->code != QnxPulseWrite)
+    {
+        return false;
+    }
+
+    uint32_t value = (uint32_t)pulse->value.sival_int;
+    int fd = (int)(value >> 8);
+    bool valid = false;
+
+    pthread_mutex_lock(&g_qnxLock);
+    if (fd < g_qnxRegistrationCount)
+    {
+        QnxRegistration* registration = &g_qnxRegistrations[fd];
+        if (registration->Registered && registration->Channel == port && (registration->Sequence & 0xFF) == (value & 0xFF))
+        {
+            memset(event, 0, sizeof(SocketEvent));
+            event->Data = registration->Data;
+            event->Events = pulse->code == QnxPulseRead ? SocketEvents_SA_READ : SocketEvents_SA_WRITE;
+            valid = true;
+        }
+    }
+    pthread_mutex_unlock(&g_qnxLock);
+    return valid;
+}
+
+// Returns one event per call: the engine calls again at once. Taking more
+// pulses without blocking would need TimerTimeout before each
+// MsgReceivePulse, and a signal handler running between the two can make the
+// receive block while the events already taken wait.
+static int32_t WaitForSocketEventsInner(int32_t port, SocketEvent* buffer, int32_t* count)
+{
+    if (*count <= 0)
+    {
+        *count = 0;
+        return Error_SUCCESS;
+    }
+
+    for (;;)
+    {
+        struct _pulse pulse;
+
+        if (MsgReceivePulse(port, &pulse, sizeof(pulse), NULL) == -1)
+        {
+            if (errno == EINTR)
+            {
+                continue;
+            }
+            *count = 0;
+            return SystemNative_ConvertErrorPlatformToPal(errno);
+        }
+        if (QnxEventFromPulse(port, &pulse, &buffer[0]))
+        {
+            *count = 1;
+            return Error_SUCCESS;
+        }
+    }
+}
+
 #else // !HAVE_KQUEUE !HAVE_EPOLL
 
 static const size_t SocketEventBufferElementSize = 0;
@@ -3724,6 +4088,9 @@ int32_t SystemNative_SendFile(intptr_t out_fd, intptr_t in_fd, int64_t offset, i
 error:
     savedErrno = errno;
     free(buffer);
+    // The input is a file; only the output (a socket) can leave EAGAIN.
+    errno = savedErrno;
+    QNX_ARM_ON_ERROR(outfd, SocketEvents_SA_WRITE);
     return SystemNative_ConvertErrorPlatformToPal(savedErrno);
 
 #endif

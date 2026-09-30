@@ -5,6 +5,7 @@
 #include "pal_config.h"
 #include "pal_errno.h"
 #include "pal_io.h"
+#include "pal_networking.h"
 #include "pal_utilities.h"
 #include "pal_safecrt.h"
 #include "pal_types.h"
@@ -365,6 +366,12 @@ intptr_t SystemNative_Open(const char* path, int32_t flags, int32_t mode)
 
 int32_t SystemNative_Close(intptr_t fd)
 {
+#if defined(__QNXNTO__)
+    // The socket event port keeps a table by descriptor number, and .NET never
+    // unregisters a socket before closing it (epoll and kqueue forget closed
+    // descriptors by themselves), so the entry goes here.
+    QnxSocketEventPortForget(ToFileDescriptor(fd));
+#endif
     int result = close(ToFileDescriptor(fd));
     if (result < 0 && errno == EINTR) result = 0; // on all supported platforms, close(2) returning EINTR still means it was released
     return result;
@@ -1254,7 +1261,12 @@ int32_t SystemNative_FAllocate(intptr_t fd, int64_t offset, int64_t length)
 
 int32_t SystemNative_Read(intptr_t fd, void* buffer, int32_t bufferSize)
 {
-    return Common_Read(fd, buffer, bufferSize);
+    int32_t result = Common_Read(fd, buffer, bufferSize);
+    if (result < 0)
+    {
+        QNX_ARM_ON_ERROR(fd, SocketEvents_SA_READ);
+    }
+    return result;
 }
 
 int32_t SystemNative_ReadLink(const char* path, char* buffer, int32_t bufferSize)
@@ -1297,7 +1309,12 @@ void SystemNative_Sync(void)
 
 int32_t SystemNative_Write(intptr_t fd, const void* buffer, int32_t bufferSize)
 {
-    return Common_Write(fd, buffer, bufferSize);
+    int32_t result = Common_Write(fd, buffer, bufferSize);
+    if (result < 0)
+    {
+        QNX_ARM_ON_ERROR(fd, SocketEvents_SA_WRITE);
+    }
+    return result;
 }
 
 #if !HAVE_FCOPYFILE
