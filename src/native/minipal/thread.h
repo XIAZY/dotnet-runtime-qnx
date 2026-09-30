@@ -66,6 +66,9 @@ static inline size_t minipal_get_current_thread_id_no_cache(void)
     tid = (size_t)pthread_self();
 #elif defined(__wasm)
     tid = (size_t)(void*)pthread_self();
+#elif defined(__QNXNTO__)
+    // Thread ids are small integers, unique within the process, as gettid's are on Linux.
+    tid = (size_t)pthread_self();
 #else
 #error "Unsupported platform"
 #endif
