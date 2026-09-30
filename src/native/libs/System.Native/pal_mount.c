@@ -120,9 +120,12 @@ int32_t SystemNative_GetAllMountPoints(MountPointFound onFound, void* context)
 }
 
 #elif defined(__QNXNTO__)
-    // QNX has no /proc/mounts or getmntent; mount points are not listed.
-    (void)onFound;
-    (void)context;
+    // QNX has no /proc/mounts or getmntent (its /proc/mount is the pathname
+    // space of resource managers, not a mount table). Report the root, which
+    // always exists: DriveInfo.GetDrives() must not be empty, since
+    // PowerShell's file system provider builds its "/" drive from it and
+    // mangles every path without one ("/root" became "/:/oot").
+    onFound(context, "/");
     return 0;
 }
 
