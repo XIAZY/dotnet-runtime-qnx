@@ -117,7 +117,7 @@ typedef struct {
 
 /*HACK, move this to an eventual mono-signal.c*/
 #if defined( __linux__) || defined(__sun) || defined(__APPLE__) || defined(__NetBSD__) || \
-       defined(__FreeBSD__) || defined(__OpenBSD__)
+       defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__QNXNTO__)
 #if defined(HAVE_SIGACTION) || defined(__APPLE__)  // the __APPLE__ check is required for the tvos simulator, which has ucontext_t but not sigaction
 #define MONO_SIGNAL_USE_UCONTEXT_T 1
 #endif

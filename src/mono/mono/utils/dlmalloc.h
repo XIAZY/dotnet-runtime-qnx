@@ -200,7 +200,7 @@ size_t dlmalloc_footprint(void);
   thus be inaccurate.
 */
 #ifndef HAVE_USR_INCLUDE_MALLOC_H
-#ifndef _MALLOC_H
+#if !defined(_MALLOC_H) && !defined(_MALLOC_H_INCLUDED) /* glibc, QNX */
 #ifndef MALLINFO_FIELD_TYPE
 #define MALLINFO_FIELD_TYPE size_t
 #endif /* MALLINFO_FIELD_TYPE */
