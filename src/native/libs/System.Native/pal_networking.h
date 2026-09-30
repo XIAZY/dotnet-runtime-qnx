@@ -298,6 +298,19 @@ typedef struct
     uint32_t Padding;    // Pad out to 8-byte alignment
 } SocketEvent;
 
+#if defined(__QNXNTO__)
+// Arms the socket event port for fd in one direction (SocketEvents_SA_READ or
+// SocketEvents_SA_WRITE) when the call that just failed left errno EAGAIN,
+// EWOULDBLOCK or EINPROGRESS and fd is registered; keeps errno. The shims
+// that can meet EAGAIN call it (see pal_networking.c).
+void QnxSocketEventPortArmOnError(int fd, int32_t events);
+// Forgets fd's registration, if any; called before the descriptor is closed.
+void QnxSocketEventPortForget(int fd);
+#define QNX_ARM_ON_ERROR(fd, events) QnxSocketEventPortArmOnError((int)(fd), (events))
+#else
+#define QNX_ARM_ON_ERROR(fd, events) ((void)0)
+#endif
+
 PALEXPORT int32_t SystemNative_GetHostEntryForName(const uint8_t* address, int32_t addressFamily, HostEntry* entry);
 
 PALEXPORT void SystemNative_FreeHostEntry(HostEntry* entry);
