@@ -120,6 +120,11 @@ include(${CMAKE_CURRENT_LIST_DIR}/extra_libs.cmake)
 set(NATIVE_LIBS_EXTRA)
 append_extra_system_libs(NATIVE_LIBS_EXTRA)
 
+if (CLR_CMAKE_TARGET_QNX)
+    # Linux-format /proc files for the Linux managed libraries.
+    list (APPEND NATIVE_SOURCES pal_procfs_qnx.c)
+endif ()
+
 if (GEN_SHARED_LIB)
     add_library(System.Native
         SHARED
