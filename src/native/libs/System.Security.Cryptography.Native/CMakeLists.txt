@@ -126,6 +126,15 @@ if (GEN_SHARED_LIB)
         PRIVATE
         ${NATIVE_LIBS_EXTRA}
     )
+
+    if (CLR_CMAKE_TARGET_QNX)
+        # OpenSSL is linked statically on QNX (its own 0.9.8 is too old). Its
+        # symbols stay inside the library, which exports only its entry points,
+        # and its socket calls (BIO) resolve against libsocket.
+        target_link_options(System.Security.Cryptography.Native.OpenSsl PRIVATE
+            "LINKER:--exclude-libs,libcrypto.a:libssl.a")
+        target_link_libraries(System.Security.Cryptography.Native.OpenSsl PRIVATE socket)
+    endif()
 endif()
 
 message(STATUS "OPENSSL_INCLUDE_DIR:    ${OPENSSL_INCLUDE_DIR}")

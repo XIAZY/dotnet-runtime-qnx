@@ -153,8 +153,13 @@ if (CLR_CMAKE_TARGET_UNIX OR CLR_CMAKE_TARGET_BROWSER OR CLR_CMAKE_TARGET_WASI)
 
     add_subdirectory(System.Native)
     if (CLR_CMAKE_TARGET_QNX)
-        # QNX 6.5 has no ICU, GSSAPI or current OpenSSL: globalization runs in
-        # invariant mode, and only System.Native and compression are built.
+        # QNX 6.5 has no ICU or GSSAPI: globalization runs in invariant mode.
+        # Its OpenSSL is 0.9.8, too old for .NET, so cryptography is built
+        # only when a current OpenSSL is given (OPENSSL_ROOT_DIR), and links
+        # it statically.
+        if (OPENSSL_ROOT_DIR)
+            add_subdirectory(System.Security.Cryptography.Native)
+        endif ()
         return()
     endif ()
     add_subdirectory(System.Globalization.Native)

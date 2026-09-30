@@ -39,6 +39,15 @@ check_source_compiles(C "
 int main(void) { ENGINE_init(NULL); return 1; }"
 HAVE_OPENSSL_ENGINE)
 
+include(CheckSymbolExists)
+include(CMakePushCheckState)
+cmake_push_check_state(RESET)
+check_symbol_exists(
+    timegm
+    time.h
+    HAVE_TIMEGM)
+cmake_pop_check_state()
+
 configure_file(
     ${CMAKE_CURRENT_SOURCE_DIR}/pal_crypto_config.h.in
     ${CMAKE_CURRENT_BINARY_DIR}/pal_crypto_config.h)
