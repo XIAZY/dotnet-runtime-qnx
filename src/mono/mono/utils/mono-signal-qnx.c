@@ -4,12 +4,14 @@
  *
  * QNX 6.5 does not reliably save the interrupted code's FPU/SSE registers
  * around a signal handler: when the handler uses them, the interrupted code
- * can find them changed (measured: 4
- * runs in 10 under QEMU). The runtime is built with SSE2, so any C code,
+ * finds them changed after about 9 handler runs in 10 (measured on QNX
+ * 6.5.0). The runtime is built with SSE2, so any C code,
  * handlers included, may use xmm registers. Every handler is therefore
  * entered through a trampoline, written in assembly so that no compiler
  * generated code runs first, which saves the state with fxsave, calls the
- * handler, and restores the state with fxrstor.
+ * handler, and restores the state with fxrstor. Between the two, the
+ * handler runs from a clean state, as it would on Linux: direction flag
+ * clear, x87 initialised, MXCSR at its default.
  *
  * Copyright (c) Xia Zhongyang.
  * Licensed under the MIT License.
@@ -49,6 +51,9 @@ __asm__ (
 	"	subl $524, %esp\n"		/* the fxsave area, and room to align it */
 	"	andl $-16, %esp\n"
 	"	fxsave (%esp)\n"
+	/* Start the handler from the state the ABI promises at a call, as Linux does. */
+	"	cld\n"				/* the interrupted code may have set the direction flag */
+	"	fninit\n"			/* empty x87 stack, default control word */
 	"	call 1f\n"
 	"1:	popl %ebx\n"
 	"	addl $_GLOBAL_OFFSET_TABLE_+(.-1b), %ebx\n"
@@ -56,6 +61,8 @@ __asm__ (
 	"	movl mono_qnx_signal_handlers@GOT(%ebx), %ecx\n"
 	"	movl (%ecx,%eax,4), %ecx\n"
 	"	subl $16, %esp\n"		/* three arguments, keeping the alignment */
+	"	movl $0x1f80, 0(%esp)\n"	/* default MXCSR: all exceptions masked, round to nearest */
+	"	ldmxcsr 0(%esp)\n"
 	"	movl %eax, 0(%esp)\n"
 	"	movl 12(%ebp), %edx\n"		/* info */
 	"	movl %edx, 4(%esp)\n"
