@@ -14,6 +14,11 @@
 // Check if we should use getfsstat or /proc/mounts
 #if HAVE_MNTINFO
 #include <sys/mount.h>
+#elif defined(__QNXNTO__)
+// QNX has neither statfs nor a mount table file; see SystemNative_GetAllMountPoints.
+#include <sys/statvfs.h>
+// statvfs has SunOS's f_basetype, but not its size constant.
+#define _FSTYPSZ ((int)sizeof(((struct statvfs*)0)->f_basetype))
 #else
 #include <sys/statfs.h>
 #if HAVE_SYS_MNTENT_H
@@ -111,6 +116,13 @@ int32_t SystemNative_GetAllMountPoints(MountPointFound onFound, void* context)
     }
 
     free(mounts);
+    return 0;
+}
+
+#elif defined(__QNXNTO__)
+    // QNX has no /proc/mounts or getmntent; mount points are not listed.
+    (void)onFound;
+    (void)context;
     return 0;
 }
 

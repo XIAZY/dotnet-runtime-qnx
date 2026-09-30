@@ -162,8 +162,10 @@ inline static int32_t ConvertErrorPlatformToPal(int32_t platformErrno)
             return Error_EAFNOSUPPORT;
         case EAGAIN:
             return Error_EAGAIN;
+#if EALREADY != EBUSY // QNX: EALREADY is EBUSY (16)
         case EALREADY:
             return Error_EALREADY;
+#endif
         case EBADF:
             return Error_EBADF;
         case EBADMSG:

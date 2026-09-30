@@ -18,6 +18,7 @@
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/time.h>
@@ -311,8 +312,10 @@ static int32_t ConvertOpenFlags(int32_t flags)
         ret |= O_TRUNC;
     if (flags & PAL_O_SYNC)
         ret |= O_SYNC;
+#ifdef O_NOFOLLOW
     if (flags & PAL_O_NOFOLLOW)
         ret |= O_NOFOLLOW;
+#endif // QNX 6.5 has no O_NOFOLLOW; SystemNative_Open checks for a link instead
 
     assert(ret != -1);
     return ret;
@@ -320,6 +323,9 @@ static int32_t ConvertOpenFlags(int32_t flags)
 
 intptr_t SystemNative_Open(const char* path, int32_t flags, int32_t mode)
 {
+#ifndef O_NOFOLLOW
+    int32_t original_flags = flags;
+#endif
 // these two ifdefs are for platforms where we dont have the open version of CLOEXEC and thus
 // must simulate it by doing a fcntl with the SETFFD version after the open instead
 #if !HAVE_O_CLOEXEC
@@ -338,6 +344,20 @@ intptr_t SystemNative_Open(const char* path, int32_t flags, int32_t mode)
     if (old_flags & PAL_O_CLOEXEC)
     {
         fcntl(result, F_SETFD, FD_CLOEXEC);
+    }
+#endif
+#ifndef O_NOFOLLOW
+    // Without O_NOFOLLOW, refuse a path that is a symbolic link after opening
+    // it. This cannot see a link swapped in between open and lstat.
+    if (result >= 0 && (original_flags & PAL_O_NOFOLLOW))
+    {
+        struct stat linkStat;
+        if (lstat(path, &linkStat) == 0 && S_ISLNK(linkStat.st_mode))
+        {
+            close(result);
+            errno = ELOOP;
+            return -1;
+        }
     }
 #endif
     return result;
@@ -815,7 +835,11 @@ void SystemNative_GetDeviceIdentifiers(uint64_t dev, uint32_t* majorNumber, uint
 int32_t SystemNative_MkNod(const char* pathName, uint32_t mode, uint32_t major, uint32_t minor)
 {
 #if !defined(TARGET_WASI)
+#if defined(__QNXNTO__)
+    dev_t dev = (dev_t)makedev(0, major, minor); // node, major, minor
+#else
     dev_t dev = (dev_t)makedev(major, minor);
+#endif
 
     int32_t result;
     while ((result = mknod(pathName, (mode_t)mode, dev)) < 0 && errno == EINTR);
@@ -835,6 +859,44 @@ int32_t SystemNative_MkFifo(const char* pathName, uint32_t mode)
     return EINTR;
 #endif /* TARGET_WASI */
 }
+
+#if !HAVE_MKDTEMP
+// Without mkdtemp (QNX 6.5): draw names with mktemp until mkdir creates one.
+static char* mkdtemp(char* pathTemplate)
+{
+    size_t length = strlen(pathTemplate);
+    char* original = strdup(pathTemplate);
+    if (original == NULL)
+    {
+        return NULL;
+    }
+
+    char* result = NULL;
+    for (int attempt = 0; attempt < 100; attempt++)
+    {
+        memcpy(pathTemplate, original, length + 1);
+        if (mktemp(pathTemplate) == NULL || pathTemplate[0] == '\0')
+        {
+            errno = EINVAL;
+            break;
+        }
+        if (mkdir(pathTemplate, 0700) == 0)
+        {
+            result = pathTemplate;
+            break;
+        }
+        if (errno != EEXIST)
+        {
+            break;
+        }
+    }
+
+    int savedErrno = errno;
+    free(original);
+    errno = savedErrno;
+    return result;
+}
+#endif
 
 char* SystemNative_MkdTemp(char* pathTemplate)
 {
