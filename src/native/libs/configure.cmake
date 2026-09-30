@@ -670,6 +670,11 @@ check_symbol_exists(
     HAVE_FUTIMES)
 
 check_symbol_exists(
+    mkdtemp
+    "stdlib.h;unistd.h"
+    HAVE_MKDTEMP)
+
+check_symbol_exists(
     futimens
     sys/stat.h
     HAVE_FUTIMENS)
