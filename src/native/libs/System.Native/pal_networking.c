@@ -7,6 +7,7 @@
 
 #include "pal_config.h"
 #include "pal_networking.h"
+#include "pal_io.h"
 #include "pal_safecrt.h"
 #include "pal_utilities.h"
 #include <pal_networking_common.h>
@@ -1498,6 +1499,7 @@ int32_t SystemNative_Receive(intptr_t socket, void* buffer, int32_t bufferLen, i
     }
 
     *received = 0;
+    QNX_ARM_ON_ERROR(fd, HandleEvents_READ);
     return SystemNative_ConvertErrorPlatformToPal(errno);
 }
 
@@ -1601,6 +1603,7 @@ int32_t SystemNative_ReceiveMessage(intptr_t socket, MessageHeader* messageHeade
     }
 
     *received = 0;
+    QNX_ARM_ON_ERROR(fd, HandleEvents_READ);
     return SystemNative_ConvertErrorPlatformToPal(errno);
 }
 
@@ -1636,6 +1639,7 @@ int32_t SystemNative_Send(intptr_t socket, void* buffer, int32_t bufferLen, int3
     }
 
     *sent = 0;
+    QNX_ARM_ON_ERROR(fd, HandleEvents_WRITE);
     return SystemNative_ConvertErrorPlatformToPal(errno);
 }
 
@@ -1682,6 +1686,7 @@ int32_t SystemNative_SendMessage(intptr_t socket, MessageHeader* messageHeader, 
     }
 
     *sent = 0;
+    QNX_ARM_ON_ERROR(fd, HandleEvents_WRITE);
     return SystemNative_ConvertErrorPlatformToPal(errno);
 }
 
@@ -1731,6 +1736,7 @@ int32_t SystemNative_Accept(intptr_t socket, uint8_t* socketAddress, int32_t* so
     if (accepted == -1)
     {
         *acceptedSocket = -1;
+        QNX_ARM_ON_ERROR(fd, HandleEvents_READ);
         return SystemNative_ConvertErrorPlatformToPal(errno);
     }
 
@@ -1776,6 +1782,10 @@ int32_t SystemNative_Connect(intptr_t socket, uint8_t* socketAddress, int32_t so
 
     int err;
     while ((err = connect(fd, (struct sockaddr*)socketAddress, (socklen_t)socketAddressLen)) < 0 && errno == EINTR);
+    if (err != 0)
+    {
+        QNX_ARM_ON_ERROR(fd, HandleEvents_WRITE);
+    }
     return err == 0 ? Error_SUCCESS : SystemNative_ConvertErrorPlatformToPal(errno);
 }
 
@@ -3414,6 +3424,9 @@ int32_t SystemNative_SendFile(intptr_t out_fd, intptr_t in_fd, int64_t offset, i
 error:
     savedErrno = errno;
     free(buffer);
+    // The input is a file; only the output (a socket) can leave EAGAIN.
+    errno = savedErrno;
+    QNX_ARM_ON_ERROR(outfd, HandleEvents_WRITE);
     return SystemNative_ConvertErrorPlatformToPal(savedErrno);
 
 #endif

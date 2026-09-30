@@ -931,6 +931,19 @@ typedef struct
     uint32_t Padding;    // Pad out to 8-byte alignment
 } HandleEvent;
 
+#if defined(__QNXNTO__)
+// Arms the handle event port for fd in one direction (HandleEvents_READ or
+// HandleEvents_WRITE) when the call that just failed left errno EAGAIN,
+// EWOULDBLOCK or EINPROGRESS and fd is registered; keeps errno. The shims
+// that can meet EAGAIN call it (see pal_io.c and pal_networking.c).
+void QnxHandleEventPortArmOnError(int fd, int32_t events);
+// Forgets fd's registration, if any; called before the descriptor is closed.
+void QnxHandleEventPortForget(int fd);
+#define QNX_ARM_ON_ERROR(fd, events) QnxHandleEventPortArmOnError((int)(fd), (events))
+#else
+#define QNX_ARM_ON_ERROR(fd, events) ((void)0)
+#endif
+
 PALEXPORT int32_t SystemNative_CreateHandleEventPort(intptr_t* port);
 
 PALEXPORT int32_t SystemNative_CloseHandleEventPort(intptr_t port);
