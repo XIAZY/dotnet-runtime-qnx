@@ -6,6 +6,7 @@
 #include "pal_errno.h"
 #include "pal_io.h"
 #include "pal_networking.h"
+#include "pal_procfs_qnx.h"
 #include "pal_utilities.h"
 #include "pal_safecrt.h"
 #include "pal_types.h"
@@ -239,6 +240,18 @@ int32_t SystemNative_Stat(const char* path, FileStatus* output)
 {
     struct stat_ result;
     int ret;
+#if defined(__QNXNTO__)
+    // Linux process files, emulated on QNX; see pal_procfs_qnx.c.
+    if ((ret = QnxProcfsStat(path, &result)) != 0)
+    {
+        if (ret > 0)
+        {
+            ConvertFileStatus(&result, output);
+            return 0;
+        }
+        return -1;
+    }
+#endif
     while ((ret = stat_(path, &result)) < 0 && errno == EINTR);
 
     if (ret == 0)
@@ -266,7 +279,20 @@ int32_t SystemNative_FStat(intptr_t fd, FileStatus* output)
 int32_t SystemNative_LStat(const char* path, FileStatus* output)
 {
     struct stat_ result;
-    int ret = lstat_(path, &result);
+    int ret;
+#if defined(__QNXNTO__)
+    // Linux process files, emulated on QNX; see pal_procfs_qnx.c.
+    if ((ret = QnxProcfsStat(path, &result)) != 0)
+    {
+        if (ret > 0)
+        {
+            ConvertFileStatus(&result, output);
+            return 0;
+        }
+        return -1;
+    }
+#endif
+    ret = lstat_(path, &result);
 
     if (ret == 0)
     {
@@ -340,6 +366,14 @@ intptr_t SystemNative_Open(const char* path, int32_t flags, int32_t mode)
     }
 
     int result;
+#if defined(__QNXNTO__)
+    // Linux process files, emulated on QNX (read-only, always close-on-exec);
+    // see pal_procfs_qnx.c.
+    if (QnxProcfsOpen(path, &result))
+    {
+        return result;
+    }
+#endif
     while ((result = open(path, flags, (mode_t)mode)) < 0 && errno == EINTR);
 #if !HAVE_O_CLOEXEC
     if (old_flags & PAL_O_CLOEXEC)
@@ -1281,6 +1315,14 @@ int32_t SystemNative_ReadLink(const char* path, char* buffer, int32_t bufferSize
         return -1;
     }
 
+#if defined(__QNXNTO__)
+    // /proc/<pid>/exe, emulated on QNX; see pal_procfs_qnx.c.
+    int32_t emulated;
+    if (QnxProcfsReadLink(path, buffer, bufferSize, &emulated))
+    {
+        return emulated;
+    }
+#endif
     ssize_t count = readlink(path, buffer, (size_t)bufferSize);
     assert(count >= -1 && count <= bufferSize);
 
