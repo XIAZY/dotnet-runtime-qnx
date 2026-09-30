@@ -3090,6 +3090,33 @@ arch_emit_unbox_arbitrary_trampoline (MonoAotCompile *acfg, int offset, int *tra
 	emit_bytes (acfg, buf, GPTRDIFF_TO_INT (code - buf));
 	emit_symbol_diff (acfg, acfg->got_symbol, ".", (int)((offset * sizeof (target_mgreg_t)) + (code - (label + 8)) - 4));
 	*tramp_size = 4 * 4;
+#elif defined (TARGET_X86)
+	/*
+	 * As the unbox trampoline, adjust 'this' (always on the stack on x86),
+	 * then jump to the address in the GOT slot, loading mscorlib's GOT from
+	 * the caller's GOT register as the static rgctx trampoline does.
+	 */
+	guint8 buf [32];
+	guint8 *code;
+	const int this_pos = 4;
+	const int size = 16;
+
+	g_assert (MONO_ARCH_GOT_REG != X86_ECX);
+
+	code = buf;
+	x86_alu_membase_imm (code, X86_ADD, X86_ESP, this_pos, MONO_ABI_SIZEOF (MonoObject));
+	/* Load mscorlib got address */
+	x86_mov_reg_membase (code, X86_ECX, MONO_ARCH_GOT_REG, sizeof (target_mgreg_t), 4);
+	/* Branch to the target address */
+	x86_jump_membase (code, X86_ECX, offset * sizeof (target_mgreg_t));
+	/* Every trampoline of a kind has the same size; the displacement may be short. */
+	g_assert (code - buf <= size);
+	while (code - buf < size)
+		x86_nop (code);
+
+	emit_bytes (acfg, buf, GPTRDIFF_TO_INT (code - buf));
+
+	*tramp_size = size;
 #else
 	g_error ("NOT IMPLEMENTED: needed for AOT<>interp mixed mode transition");
 #endif
