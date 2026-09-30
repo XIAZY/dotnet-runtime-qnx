@@ -807,3 +807,103 @@ mono_arch_get_interp_to_native_trampoline (MonoTrampInfo **info)
 	return NULL;
 #endif /* DISABLE_INTERPRETER */
 }
+
+/*
+ * mono_arch_get_native_to_interp_trampoline:
+ *
+ *   Entry into an interpreted method from native or AOT code, for any
+ * signature. MONO_ARCH_RGCTX_REG points to a MonoFtnDesc whose addr is
+ * interp_entry_from_trampoline and whose arg is the InterpMethod. The
+ * arguments are all on the caller's stack, so the CallContext only records
+ * where they are; mono_arch_get_native_call_context_args reads them and
+ * mono_arch_set_native_call_context_ret fills in the return registers, the
+ * x87 return value and the bytes this trampoline must pop on return.
+ */
+gpointer
+mono_arch_get_native_to_interp_trampoline (MonoTrampInfo **info)
+{
+#ifndef DISABLE_INTERPRETER
+	guint8 *start = NULL, *code;
+	guint8 *label_no_fret, *label_pop;
+	MonoJumpInfo *ji = NULL;
+	GSList *unwind_ops = NULL;
+	int buf_len, cfa_offset, ctx_offset, framesize;
+
+	buf_len = 256;
+	start = code = (guint8 *) mono_global_codeman_reserve (buf_len);
+
+	/* The outgoing arguments (ccontext, rmethod) at ESP, the CallContext above them */
+	ctx_offset = 4 * sizeof (target_mgreg_t);
+	framesize = ALIGN_TO (ctx_offset + MONO_ABI_SIZEOF (CallContext), MONO_ARCH_FRAME_ALIGNMENT);
+
+	/* CFA = ESP + 4, the return address at CFA - 4 */
+	cfa_offset = sizeof (target_mgreg_t);
+	mono_add_unwind_op_def_cfa (unwind_ops, code, start, X86_ESP, cfa_offset);
+	mono_add_unwind_op_offset (unwind_ops, code, start, X86_NREG, -cfa_offset);
+
+	x86_push_reg (code, X86_EBP);
+	cfa_offset += sizeof (target_mgreg_t);
+	mono_add_unwind_op_def_cfa_offset (unwind_ops, code, start, cfa_offset);
+	mono_add_unwind_op_offset (unwind_ops, code, start, X86_EBP, -cfa_offset);
+
+	x86_mov_reg_reg (code, X86_EBP, X86_ESP);
+	mono_add_unwind_op_def_cfa_reg (unwind_ops, code, start, X86_EBP);
+
+	/* Native callers may leave the stack only 4-byte aligned */
+	x86_alu_reg_imm (code, X86_SUB, X86_ESP, framesize);
+	x86_alu_reg_imm (code, X86_AND, X86_ESP, -MONO_ARCH_FRAME_ALIGNMENT);
+
+	/* ccontext->stack = the first argument, above the saved EBP and the return address */
+	x86_lea_membase (code, X86_ECX, X86_EBP, 2 * sizeof (target_mgreg_t));
+	x86_mov_membase_reg (code, X86_ESP, ctx_offset + MONO_STRUCT_OFFSET (CallContext, stack), X86_ECX, sizeof (target_mgreg_t));
+	x86_mov_membase_imm (code, X86_ESP, ctx_offset + MONO_STRUCT_OFFSET (CallContext, stack_size), 0, sizeof (guint32));
+	x86_mov_membase_imm (code, X86_ESP, ctx_offset + MONO_STRUCT_OFFSET (CallContext, callee_stack_pop), 0, sizeof (guint32));
+	x86_mov_membase_imm (code, X86_ESP, ctx_offset + MONO_STRUCT_OFFSET (CallContext, ret_on_fpstack), 0, sizeof (guint32));
+
+	/* interp_entry_from_trampoline (ccontext, rmethod) */
+	x86_lea_membase (code, X86_ECX, X86_ESP, ctx_offset);
+	x86_mov_membase_reg (code, X86_ESP, 0, X86_ECX, sizeof (target_mgreg_t));
+	x86_mov_reg_membase (code, X86_ECX, MONO_ARCH_RGCTX_REG, MONO_STRUCT_OFFSET (MonoFtnDesc, arg), sizeof (target_mgreg_t));
+	x86_mov_membase_reg (code, X86_ESP, sizeof (target_mgreg_t), X86_ECX, sizeof (target_mgreg_t));
+	x86_mov_reg_membase (code, X86_ECX, MONO_ARCH_RGCTX_REG, MONO_STRUCT_OFFSET (MonoFtnDesc, addr), sizeof (target_mgreg_t));
+	x86_call_reg (code, X86_ECX);
+
+	/* The return value: on the x87 stack only if there is one, or in EAX:EDX */
+	x86_lea_membase (code, X86_ECX, X86_ESP, ctx_offset);
+	x86_alu_membase_imm (code, X86_CMP, X86_ECX, MONO_STRUCT_OFFSET (CallContext, ret_on_fpstack), 0);
+	label_no_fret = code;
+	x86_branch8 (code, X86_CC_EQ, 0, FALSE);
+	x86_fld_membase (code, X86_ECX, MONO_STRUCT_OFFSET (CallContext, fret), TRUE);
+	x86_patch (label_no_fret, code);
+	x86_mov_reg_membase (code, X86_EAX, X86_ECX, MONO_STRUCT_OFFSET (CallContext, eax), sizeof (target_mgreg_t));
+	x86_mov_reg_membase (code, X86_EDX, X86_ECX, MONO_STRUCT_OFFSET (CallContext, edx), sizeof (target_mgreg_t));
+	x86_mov_reg_membase (code, X86_ECX, X86_ECX, MONO_STRUCT_OFFSET (CallContext, callee_stack_pop), sizeof (guint32));
+
+	x86_mov_reg_reg (code, X86_ESP, X86_EBP);
+	x86_pop_reg (code, X86_EBP);
+	cfa_offset -= sizeof (target_mgreg_t);
+	mono_add_unwind_op_def_cfa (unwind_ops, code, start, X86_ESP, cfa_offset);
+	mono_add_unwind_op_same_value (unwind_ops, code, start, X86_EBP);
+
+	/* Return, popping the hidden struct return address if the callee must */
+	x86_test_reg_reg (code, X86_ECX, X86_ECX);
+	label_pop = code;
+	x86_branch8 (code, X86_CC_NE, 0, FALSE);
+	x86_ret (code);
+	x86_patch (label_pop, code);
+	x86_ret_imm (code, 4);
+
+	g_assertf ((code - start) <= buf_len, "%d %d", (int)(code - start), buf_len);
+
+	mono_arch_flush_icache (start, GPTRDIFF_TO_INT (code - start));
+	MONO_PROFILER_RAISE (jit_code_buffer, (start, code - start, MONO_PROFILER_CODE_BUFFER_HELPER, NULL));
+
+	if (info)
+		*info = mono_tramp_info_create ("native_to_interp_trampoline", start, GPTRDIFF_TO_UINT32 (code - start), ji, unwind_ops);
+
+	return start;
+#else
+	g_assert_not_reached ();
+	return NULL;
+#endif /* DISABLE_INTERPRETER */
+}

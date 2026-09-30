@@ -196,6 +196,7 @@ typedef struct {
 #define MONO_ARCH_INTERPRETER_SUPPORTED 1
 #define MONO_ARCH_HAVE_INTERP_NATIVE_TO_MANAGED 1
 #define MONO_ARCH_HAVE_INTERP_PINVOKE_TRAMP 1
+#define MONO_ARCH_HAVE_INTERP_ENTRY_TRAMPOLINE 1
 
 #define MONO_ARCH_HAVE_CMOV_OPS 1
 
@@ -336,6 +337,14 @@ typedef struct {
 	/* Stack usage, used for passing params on stack */
 	guint32 stack_size;
 	guint8 *stack;
+	/*
+	 * For the native-to-interp trampoline's return, set by
+	 * mono_arch_get_native_call_context_args and _set_native_call_context_ret:
+	 * the bytes the callee pops (the hidden address of a struct returned in
+	 * memory), and whether fret is returned on the x87 stack.
+	 */
+	guint32 callee_stack_pop;
+	guint32 ret_on_fpstack;
 } CallContext;
 
 guint32
