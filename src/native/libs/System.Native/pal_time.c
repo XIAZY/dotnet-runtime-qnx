@@ -114,6 +114,18 @@ int64_t SystemNative_GetBootTimeTicks(void)
     const int64_t UnixEpochTicks = 621355968000000000;
 
     return UnixEpochTicks + sinceEpochTicks - sinceBootTicks;
+#elif defined(__QNXNTO__)
+    // QNX's CLOCK_MONOTONIC counts from boot. Process start times in the
+    // emulated /proc/<pid>/stat (pal_procfs_qnx.c) use the same boot time.
+    struct timespec realtime, monotonic;
+    clock_gettime(CLOCK_REALTIME, &realtime);
+    clock_gettime(CLOCK_MONOTONIC, &monotonic);
+
+    int64_t sinceBootTicks = ((int64_t)monotonic.tv_sec * SecondsToTicks) + (monotonic.tv_nsec / TicksToNanoSeconds);
+    int64_t sinceEpochTicks = ((int64_t)realtime.tv_sec * SecondsToTicks) + (realtime.tv_nsec / TicksToNanoSeconds);
+    const int64_t UnixEpochTicks = 621355968000000000;
+
+    return UnixEpochTicks + sinceEpochTicks - sinceBootTicks;
 #else
     return -1;
 #endif
