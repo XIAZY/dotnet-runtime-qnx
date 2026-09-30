@@ -13,6 +13,9 @@
 #include <string.h>
 #include <fcntl.h>
 #include <errno.h>
+#ifdef HOST_QNX
+#include <sys/syspage.h>
+#endif
 
 #ifdef HOST_WIN32
 #include <windows.h>
@@ -182,7 +185,10 @@ mono_cpu_count (void)
 
 #endif /* defined(HOST_ARM) || defined (HOST_ARM64) */
 
-#ifdef HAVE_SYS_SYSCTL_H
+#ifdef HOST_QNX
+	/* The system page is QNX's own record of the CPUs. */
+	return _syspage_ptr->num_cpu;
+#elif defined (HAVE_SYS_SYSCTL_H)
 	{
 		int count;
 		int mib [2];
