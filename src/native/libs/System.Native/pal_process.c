@@ -345,6 +345,12 @@ int32_t SystemNative_ForkAndExecProcess(const char* filename,
 
 #if defined (__GLIBC__)
     if ((processId = vfork()) == 0) // processId == 0 if this is child process
+#elif defined(__QNXNTO__)
+    // QNX: fork() fails with ENOSYS in a multithreaded process, so vfork() is the only way.
+    // It fails spuriously with EBADF while other threads open and close descriptors (1783 times
+    // in 2000 in a probe on QNX 6.5.0), so it is retried.
+    while ((processId = vfork()) == -1 && errno == EBADF);
+    if (processId == 0)
 #else
     // musl libc has an undocumented failure mode around setuid(); we must exclude it.
     if (setCredentials)
