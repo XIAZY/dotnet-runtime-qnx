@@ -90,6 +90,12 @@
 /* Target Platform is Linux (musl libc)*/
 #cmakedefine TARGET_LINUX_MUSL 1
 
+/* Host Platform is QNX Neutrino */
+#cmakedefine HOST_QNX 1
+
+/* Target Platform is QNX Neutrino */
+#cmakedefine TARGET_QNX 1
+
 /* Define to 1 if you have the <sys/types.h> header file. */
 #cmakedefine HAVE_SYS_TYPES_H 1
 
