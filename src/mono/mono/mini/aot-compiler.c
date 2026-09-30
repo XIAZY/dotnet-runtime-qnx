@@ -2653,25 +2653,34 @@ arch_emit_static_rgctx_trampoline (MonoAotCompile *acfg, int offset, int *tramp_
 #endif
 
 #elif defined(TARGET_X86)
-	guint8 buf [128];
-	guint8 *code;
+	/*
+	 * These trampolines are also handed to native code (an [UnmanagedCallersOnly]
+	 * method run by the interpreter), which does not set the GOT register EBX
+	 * that AOT code does. So compute the address of this image's GOT from EIP,
+	 * the way the GOT slots were filled in (get_numerous_trampoline () fills
+	 * the slots of the image the trampoline comes from). The displacements
+	 * are always 32 bits so that every trampoline has the same size.
+	 */
+	g_assert (MONO_ARCH_RGCTX_REG == X86_EDX);
 
-	/* Similar to the PPC code above */
+	/* call 1f; 1: pop %ecx */
+	emit_byte (acfg, '\xe8');
+	emit_int32 (acfg, 0);
+	emit_byte (acfg, '\x59');
+	/* add $<got> - 1b, %ecx; the immediate starts 3 bytes after 1b */
+	emit_byte (acfg, '\x81');
+	emit_byte (acfg, '\xc1');
+	emit_symbol_diff (acfg, acfg->got_symbol, ".", 3);
+	/* mov <offset>(%ecx), %edx: the rgctx argument */
+	emit_byte (acfg, '\x8b');
+	emit_byte (acfg, '\x91');
+	emit_int32 (acfg, offset * sizeof (target_mgreg_t));
+	/* jmp *<offset + 1>(%ecx): the target */
+	emit_byte (acfg, '\xff');
+	emit_byte (acfg, '\xa1');
+	emit_int32 (acfg, (offset + 1) * sizeof (target_mgreg_t));
 
-	g_assert (MONO_ARCH_RGCTX_REG != X86_ECX);
-
-	code = buf;
-	/* Load mscorlib got address */
-	x86_mov_reg_membase (code, X86_ECX, MONO_ARCH_GOT_REG, sizeof (target_mgreg_t), 4);
-	/* Load arg */
-	x86_mov_reg_membase (code, MONO_ARCH_RGCTX_REG, X86_ECX, offset * sizeof (target_mgreg_t), 4);
-	/* Branch to the target address */
-	x86_jump_membase (code, X86_ECX, (offset + 1) * sizeof (target_mgreg_t));
-
-	emit_bytes (acfg, buf, GPTRDIFF_TO_INT (code - buf));
-
-	*tramp_size = 15;
-	g_assert (code - buf == *tramp_size);
+	*tramp_size = 24;
 #else
 	g_assert_not_reached ();
 #endif
