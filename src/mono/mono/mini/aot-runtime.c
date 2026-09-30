@@ -6273,6 +6273,7 @@ mono_aot_get_unbox_trampoline (MonoMethod *method, gpointer addr)
 	code = NULL;
 	low = 0;
 	high = GPTRDIFF_TO_INT (ut_end - ut);
+	gboolean found = FALSE;
 	while (low < high) {
 		entry_index = (low + high) / 2;
 		entry = &ut [entry_index];
@@ -6281,8 +6282,21 @@ mono_aot_get_unbox_trampoline (MonoMethod *method, gpointer addr)
 		} else if (entry [0] > method_index) {
 			high = entry_index;
 		} else {
+			found = TRUE;
 			break;
 		}
+	}
+
+	if (!found) {
+		/*
+		 * The image has no unbox trampoline for this method: it was not
+		 * compiled (profile-only images compile a subset), and entry_index is
+		 * a neighbour's, whose trampoline would call the wrong method. The
+		 * method runs in the interpreter; unbox through the arbitrary
+		 * trampoline, as for a method without an image.
+		 */
+		g_assert (mono_use_interpreter);
+		return mono_aot_get_unbox_arbitrary_trampoline (addr);
 	}
 
 	if (amodule->info.flags & MONO_AOT_FILE_FLAG_CODE_EXEC_ONLY)
