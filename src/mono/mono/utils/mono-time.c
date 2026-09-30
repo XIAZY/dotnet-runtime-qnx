@@ -100,7 +100,19 @@ mono_100ns_ticks (void)
 	static struct timespec tspec_freq = {0};
 	static int can_use_clock = 0;
 	if (!tspec_freq.tv_nsec) {
+#ifdef HOST_QNX
+		/*
+		 * QNX 6.5 fails clock_getres (CLOCK_MONOTONIC) with EINVAL although
+		 * clock_gettime (CLOCK_MONOTONIC) works; both clocks run on the system
+		 * tick, so take CLOCK_REALTIME's resolution. The probe must not leave
+		 * errno changed: this runs between a P/Invoke and the read of its errno.
+		 */
+		int saved_errno = errno;
+		can_use_clock = clock_getres (CLOCK_REALTIME, &tspec_freq) == 0;
+		errno = saved_errno;
+#else
 		can_use_clock = clock_getres (CLOCK_MONOTONIC, &tspec_freq) == 0;
+#endif
 		/*printf ("resolution: %lu.%lu\n", tspec_freq.tv_sec, tspec_freq.tv_nsec);*/
 	}
 	if (can_use_clock) {
