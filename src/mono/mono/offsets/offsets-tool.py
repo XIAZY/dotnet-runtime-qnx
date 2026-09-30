@@ -156,6 +156,11 @@ class OffsetsTool:
 					print ("could not find a valid include path for target, provide one via --prefix=<path>.", file=sys.stderr)
 					sys.exit (1)
 
+		elif "i686-linux-gnu" == args.abi:
+			require_sysroot (args)
+			self.target = Target ("TARGET_X86", None, LINUX_DEFINES)
+			self.target_args += ["--target=i686-linux-gnu"]
+			self.target_args += ["--sysroot", args.sysroot]
 		elif "aarch64-linux-gnu" == args.abi:
 			require_sysroot (args)
 			self.target = Target ("TARGET_ARM64", None, LINUX_DEFINES)
