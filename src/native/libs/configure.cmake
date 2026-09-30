@@ -21,6 +21,9 @@ elseif (CLR_CMAKE_TARGET_SUNOS)
     # requires /opt/tools when building in Global Zone (GZ)
     include_directories(SYSTEM /opt/local/include /opt/tools/include)
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fstack-protector")
+elseif (CLR_CMAKE_TARGET_QNX)
+    # Sockets, getifaddrs and sysctl are in libsocket; every check links it.
+    set(CMAKE_REQUIRED_LINK_OPTIONS -lsocket)
 endif ()
 
 if(CLR_CMAKE_USE_SYSTEM_LIBUNWIND)

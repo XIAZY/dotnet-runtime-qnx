@@ -10,6 +10,8 @@ macro(append_extra_system_libs NativeLibsExtra)
         list(APPEND ${NativeLibsExtra} socket)
     elseif (CLR_CMAKE_TARGET_HAIKU)
         list (APPEND ${NativeLibsExtra} network bsd)
+    elseif (CLR_CMAKE_TARGET_QNX)
+        list (APPEND ${NativeLibsExtra} socket)
     endif ()
 
     if (CLR_CMAKE_TARGET_APPLE)
