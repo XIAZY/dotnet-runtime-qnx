@@ -21,6 +21,7 @@
 
 #include <mono/utils/mono-signal-qnx.h>
 #include <glib.h>
+#include <unistd.h>
 
 typedef void (*MonoQnxSignalHandler) (int, siginfo_t *, void *);
 
@@ -72,17 +73,47 @@ __asm__ (
 	".size mono_qnx_signal_trampoline, .-mono_qnx_signal_trampoline\n"
 );
 
+/* Mono's SIGBUS handler, called by qnx_sigbus_handler. */
+static MonoQnxSignalHandler qnx_sigbus_next;
+
+/*
+ * When a MAP_LAZY page is first touched and no memory is left to back it,
+ * QNX delivers SIGBUS with BUS_OBJERR (measured on QNX 6.5.0 by exhausting
+ * memory with lazy mappings; the code is otherwise documented only for
+ * hardware memory errors). Say so plainly instead of reporting a crash.
+ * Runs behind the trampoline, like every other handler.
+ */
+static void
+qnx_sigbus_handler (int signo, siginfo_t *info, void *context)
+{
+	if (info && info->si_code == BUS_OBJERR) {
+		static const char message [] = "Out of memory: there is no memory left to back a page the runtime is using (SIGBUS, BUS_OBJERR).\n";
+		write (STDERR_FILENO, message, sizeof (message) - 1);
+		_exit (1);
+	}
+	if (qnx_sigbus_next)
+		qnx_sigbus_next (signo, info, context);
+}
+
 void
 mono_qnx_wrap_signal_handler (int signo, struct sigaction *sa)
 {
 	if (signo <= 0 || signo > _SIGMAX)
 		return;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wstrict-prototypes" /* QNX's SIG_DFL and SIG_IGN casts */
 	if (sa->sa_handler == SIG_DFL || sa->sa_handler == SIG_IGN)
 		return;
+#pragma clang diagnostic pop
 	if ((void (*) (int, siginfo_t *, void *))sa->sa_sigaction == mono_qnx_signal_trampoline)
 		return;
 	/* sa_handler and sa_sigaction share storage; the trampoline passes all three arguments. */
-	mono_qnx_signal_handlers [signo] = (MonoQnxSignalHandler)sa->sa_sigaction;
+	if (signo == SIGBUS && (MonoQnxSignalHandler)sa->sa_sigaction != qnx_sigbus_handler) {
+		qnx_sigbus_next = (MonoQnxSignalHandler)sa->sa_sigaction;
+		mono_qnx_signal_handlers [signo] = qnx_sigbus_handler;
+	} else {
+		mono_qnx_signal_handlers [signo] = (MonoQnxSignalHandler)sa->sa_sigaction;
+	}
 	sa->sa_sigaction = mono_qnx_signal_trampoline;
 }
 
