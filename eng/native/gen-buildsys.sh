@@ -79,6 +79,9 @@ if [[ "$CROSSCOMPILE" == "1" ]]; then
     elif [[ "$target_os" == "openharmony" ]]; then
         # OpenHarmony NDK toolchain is injected by build-commons.sh; do not override it.
         true
+    elif [[ "$target_os" == "qnx" ]]; then
+        # QNX's toolchain is repo-owned: eng/common is Arcade's (see eng/native/qnx/toolchain.cmake).
+        cmake_extra_defines="$cmake_extra_defines -DCMAKE_TOOLCHAIN_FILE=$scriptroot/qnx/toolchain.cmake"
     else
         cmake_extra_defines="$cmake_extra_defines -DCMAKE_TOOLCHAIN_FILE=$scriptroot/../common/cross/toolchain.cmake"
     fi

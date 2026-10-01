@@ -32,7 +32,7 @@ usage()
   echo "                                  [Default: Debug]"
   echo "  --os                            Target operating system: windows, linux, freebsd, osx, maccatalyst, tvos,"
   echo "                                  tvossimulator, ios, iossimulator, android, browser, wasi, netbsd, illumos, solaris"
-  echo "                                  linux-musl, linux-bionic, openharmony, tizen, or haiku."
+  echo "                                  linux-musl, linux-bionic, openharmony, tizen, haiku, or qnx."
   echo "                                  [Default: Your machine's OS.]"
   echo "  --targetrid <rid>               Optional argument that overrides the target rid name."
   echo "  --projects <value>              Project or solution file(s) to build."
@@ -315,6 +315,8 @@ while [[ $# -gt 0 ]]; do
           os="openharmony" ;;
         haiku)
           os="haiku" ;;
+        qnx)
+          os="qnx" ;;
         *)
           echo "Unsupported target OS '$2'."
           echo "Try 'build.sh --help' for values supported by '--os'."

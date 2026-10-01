@@ -631,6 +631,9 @@ elif [[ "$__TargetOS" == android ]]; then
 elif [[ "$__TargetOS" == openharmony ]]; then
     # OpenHarmony uses its NDK toolchain, no rootfs required
     true
+elif [[ "$__TargetOS" == qnx ]]; then
+    # QNX has no OpenSSL to load at run time; System.Security.Cryptography.Native links one statically.
+    __CMakeArgs="-DFEATURE_DISTRO_AGNOSTIC_SSL=0 $__CMakeArgs"
 else
     __CMakeArgs="-DFEATURE_DISTRO_AGNOSTIC_SSL=$__PortableBuild $__CMakeArgs"
 fi
