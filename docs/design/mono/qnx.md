@@ -236,7 +236,10 @@ too), so a child process that `select`s on a pipe it shares would break it.
 
 **Fact.** On QNX 6.5, unlinking a Unix socket's name while the network stack
 (io-pkt) serves another socket request, from any process, deadlocks io-pkt
-until a reboot.
+until a reboot. An unlink with no other request in progress can do it too, less
+often: measurements by the QNX port of Go saw it in a tight loop of one
+program, after close, somewhere between hundreds and tens of thousands of
+removals, and, more rarely, with the socket still open.
 
 **Consequence.** .NET unlinks socket names in `Socket.Dispose` of a bound
 Unix socket, in every `NamedPipeServerStream`, and in `File.Delete` of a
@@ -256,9 +259,18 @@ overlapping 4,000, caused no deadlock. `qnxhost` also gives programs a
 private temporary directory, where .NET creates its named pipes, so that
 programs listing `/tmp` don't touch those names.
 
+The locks cover only the concurrent form; nothing can make a lone unlink
+safe. What protects a program is creating no names in ordinary use: Mono
+creates no diagnostics server socket on QNX by default, and PowerShell, for
+example, turns its host IPC listener off.
+
 **Rejected.** The `fcntl` lock alone: it does not exclude threads of the same
 process. A lock across all users: other users' processes and programs not
 built on .NET (`sshd`) cannot be made to take it, so they are not covered.
+Unlinking a bound socket's name in `SystemNative_Close`, before the close
+(the order that made the lone-unlink hang rarer): an accepted socket reports
+its listener's path, so closing a connection would delete the listener's
+name, and the name may by then belong to another socket.
 
 ## `/proc` emulation
 
