@@ -275,6 +275,10 @@ static void ConvertByteArrayToSockAddrIn6(struct sockaddr_in6* addr, const uint8
 
     // Mark that this is INET6
     addr->sin6_family = AF_INET6;
+#if defined(__QNXNTO__)
+    // As for IPv4 (ConvertByteArrayToSockAddrIn): QNX's getnameinfo needs it.
+    addr->sin6_len = sizeof(struct sockaddr_in6);
+#endif
 }
 
 static void ConvertInAddrToByteArray(uint8_t* buffer, int32_t bufferLength, const struct in_addr* addr)
@@ -295,6 +299,11 @@ static void ConvertByteArrayToSockAddrIn(struct sockaddr_in* addr, const uint8_t
     ConvertByteArrayToInAddr(&addr->sin_addr, buffer, bufferLength);
 
     addr->sin_family = AF_INET;
+#if defined(__QNXNTO__)
+    // QNX's getnameinfo fails with EAI_FAIL unless sin_len is the
+    // structure's size (measured on QNX 6.5 for 127.0.0.1).
+    addr->sin_len = sizeof(struct sockaddr_in);
+#endif
 }
 #endif // HAVE_GETNAMEINFO
 
