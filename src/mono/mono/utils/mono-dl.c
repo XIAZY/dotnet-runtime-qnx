@@ -15,6 +15,9 @@
 #include "mono/utils/mono-path.h"
 #include "mono/utils/mono-threads-api.h"
 #include "mono/utils/mono-error-internals.h"
+#ifdef HOST_QNX
+#include "mono/utils/mono-dl-qnx.h"
+#endif
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -40,6 +43,27 @@ struct MonoDlFallbackHandler {
 };
 
 static GSList *fallback_handlers;
+
+#ifdef HOST_QNX
+/* AOT images mapped by mono-dl-qnx.c are reached through a handler of their own. */
+static void *
+qnx_image_symbol (void *handle, const char *name, char **err, void *user_data)
+{
+	void *sym = mono_qnx_image_symbol ((MonoQnxImage *)handle, name);
+	if (sym == NULL && err != NULL)
+		*err = g_strdup_printf ("symbol %s not found", name);
+	return sym;
+}
+
+static void *
+qnx_image_close (void *handle, void *user_data)
+{
+	mono_qnx_image_close ((MonoQnxImage *)handle);
+	return NULL;
+}
+
+static MonoDlFallbackHandler qnx_image_handler = { NULL, qnx_image_symbol, qnx_image_close, NULL };
+#endif
 
 static const char *
 fix_libc_name (const char *name)
@@ -133,6 +157,20 @@ mono_dl_open_full (const char *name, int mono_flags, int native_flags, MonoError
 	name = fix_libc_name (name);
 
 	ERROR_DECL (load_error);
+
+#ifdef HOST_QNX
+	/* AOT images: mapped so that only the pages used cost memory (mono-dl-qnx.c). */
+	if (name != NULL && g_str_has_suffix (name, ".dll.so")) {
+		MonoQnxImage *image = mono_qnx_image_open (name);
+		if (image != NULL) {
+			mono_refcount_init (module, NULL);
+			module->handle = image;
+			module->dl_fallback = &qnx_image_handler;
+			module->full_name = g_strdup (name);
+			return module;
+		}
+	}
+#endif
 
 	// No GC safe transition because this is called early in main.c
 	lib = mono_dl_open_file (name, lflags, load_error);
