@@ -76,6 +76,9 @@ if [[ "$CROSSCOMPILE" == "1" ]]; then
 
     if [[ "$platform" == "darwin" ]]; then
         cmake_extra_defines="$cmake_extra_defines -DCMAKE_SYSTEM_NAME=Darwin"
+    elif [[ "$target_os" == "qnx" ]]; then
+        # QNX's toolchain is repo-owned: eng/common is Arcade's (see eng/native/qnx/toolchain.cmake).
+        cmake_extra_defines="$cmake_extra_defines -DCMAKE_TOOLCHAIN_FILE=$scriptroot/qnx/toolchain.cmake"
     else
         cmake_extra_defines="$cmake_extra_defines -DCMAKE_TOOLCHAIN_FILE=$scriptroot/../common/cross/toolchain.cmake"
     fi

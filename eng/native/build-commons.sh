@@ -553,6 +553,9 @@ elif [[ "$__TargetOS" == osx || "$__TargetOS" == maccatalyst ]]; then
 elif [[ "$__TargetOS" == android ]]; then
     # nothing to do here
     true
+elif [[ "$__TargetOS" == qnx ]]; then
+    # QNX has no OpenSSL to load at run time; System.Security.Cryptography.Native links one statically.
+    __CMakeArgs="-DFEATURE_DISTRO_AGNOSTIC_SSL=0 $__CMakeArgs"
 else
     __CMakeArgs="-DFEATURE_DISTRO_AGNOSTIC_SSL=$__PortableBuild $__CMakeArgs"
 fi
