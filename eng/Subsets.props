@@ -24,12 +24,17 @@
 
   <Import Project="$(RepositoryEngineeringDir)common\native\NativeAotSupported.props" />
 
+  <!-- No NativeAOT on QNX. Set here: eng/common is Arcade's and is replaced by its updates. -->
+  <PropertyGroup Condition="'$(TargetOS)' == 'qnx'">
+    <NativeAotSupported>false</NativeAotSupported>
+  </PropertyGroup>
+
   <!-- Determine the primary runtime flavor. This is usually CoreCLR, except on
        platforms (like s390x) where only Mono is supported. The primary runtime
        flavor is used to decide when to build the hosts and installers. -->
   <PropertyGroup>
     <!-- Determine if the CoreCLR runtime can build/run for the specified target. -->
-    <_CoreCLRSupportedOS Condition="'$(TargetsMobile)' != 'true' and '$(TargetsLinuxBionic)' != 'true'">true</_CoreCLRSupportedOS>
+    <_CoreCLRSupportedOS Condition="'$(TargetsMobile)' != 'true' and '$(TargetsLinuxBionic)' != 'true' and '$(TargetsQNX)' != 'true'">true</_CoreCLRSupportedOS>
 
     <_CoreCLRSupportedOS Condition="'$(TargetsAndroid)' == 'true' and '$(TargetArchitecture)' != 'x86'">true</_CoreCLRSupportedOS>
     <_CoreCLRSupportedOS Condition="'$(TargetsLinuxBionic)' == 'true' and '$(TargetArchitecture)' != 'x86' and '$(TargetArchitecture)' != 'arm'">true</_CoreCLRSupportedOS>
