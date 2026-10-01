@@ -371,6 +371,7 @@ int32_t SystemNative_Close(intptr_t fd)
     // unregisters a socket before closing it (epoll and kqueue forget closed
     // descriptors by themselves), so the entry goes here.
     QnxSocketEventPortForget(ToFileDescriptor(fd));
+    QnxRawIpForget(ToFileDescriptor(fd));
 #endif
     int result = close(ToFileDescriptor(fd));
     if (result < 0 && errno == EINTR) result = 0; // on all supported platforms, close(2) returning EINTR still means it was released

@@ -306,6 +306,9 @@ typedef struct
 void QnxSocketEventPortArmOnError(int fd, int32_t events);
 // Forgets fd's registration, if any; called before the descriptor is closed.
 void QnxSocketEventPortForget(int fd);
+// Forgets what was remembered about a raw IPv4 ICMP socket (TTL, DF); called
+// before the descriptor is closed (see pal_networking.c).
+void QnxRawIpForget(int fd);
 #define QNX_ARM_ON_ERROR(fd, events) QnxSocketEventPortArmOnError((int)(fd), (events))
 #else
 #define QNX_ARM_ON_ERROR(fd, events) ((void)0)

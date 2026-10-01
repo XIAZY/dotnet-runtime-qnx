@@ -34,6 +34,11 @@
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#if defined(__QNXNTO__)
+#include <netinet/in_systm.h>
+#include <netinet/ip.h>
+#include <pthread.h>
+#endif
 #if HAVE_NET_IF_H
 #include <net/if.h>
 #endif
@@ -1637,6 +1642,10 @@ int32_t SystemNative_ReceiveMessage(intptr_t socket, MessageHeader* messageHeade
     return SystemNative_ConvertErrorPlatformToPal(errno);
 }
 
+#if defined(__QNXNTO__)
+static bool QnxRawIpPeer(int fd, struct sockaddr_in* peer);
+#endif
+
 int32_t SystemNative_Send(intptr_t socket, void* buffer, int32_t bufferLen, int32_t flags, int32_t* sent)
 {
     if (buffer == NULL || bufferLen < 0 || sent == NULL)
@@ -1645,6 +1654,24 @@ int32_t SystemNative_Send(intptr_t socket, void* buffer, int32_t bufferLen, int3
     }
 
     int fd = ToFileDescriptor(socket);
+
+#if defined(__QNXNTO__)
+    // A raw ICMP socket "connected" by SystemNative_Connect is not connected:
+    // send() would fail with EDESTADDRREQ. SendMessage sends to its peer.
+    struct sockaddr_in rawPeer;
+    if (QnxRawIpPeer(fd, &rawPeer))
+    {
+        IOVector vector = { (uint8_t*)buffer, (uintptr_t)bufferLen };
+        MessageHeader message;
+        memset(&message, 0, sizeof(message));
+        message.IOVectors = &vector;
+        message.IOVectorCount = 1;
+        int64_t sentBytes = 0;
+        int32_t result = SystemNative_SendMessage(socket, &message, flags, &sentBytes);
+        *sent = (int32_t)sentBytes;
+        return result;
+    }
+#endif
 
     int socketFlags;
     if (!ConvertSocketFlagsPalToPlatform(flags, &socketFlags))
@@ -1702,6 +1729,185 @@ static bool IsConnectedPeer(int fd, const struct sockaddr* addr, socklen_t addrL
 }
 #endif
 
+#if defined(__QNXNTO__)
+// QNX's raw IPv4 sockets ignore IP_TTL when they send (measured on QNX 6.5:
+// a raw ICMP socket with IP_TTL 1, connected or not, reads the option back
+// as 1, but its echo still reaches 8.8.8.8), and QNX has no option for the
+// DF bit; but they honour an IP header that the sender supplies with
+// IP_HDRINCL, TTL and DF included (measured: TTL 1 brings Time Exceeded from
+// the gateway; 3,000 bytes with DF fail with EMSGSIZE). .NET's Ping, built
+// for Linux, sets Ttl and DontFragment on its raw ICMP socket and sends the
+// ICMP message alone. So, for raw IPv4 ICMP sockets only: SetSockOpt
+// remembers IP_TTL and DontFragment=true per descriptor, and once either is
+// set, the socket is switched to IP_HDRINCL at its next send and every send
+// on it gets an IP header in front, with that TTL and DF. The state is per
+// descriptor number, like the socket event port's table: set when the socket
+// is created, cleared when it is closed.
+typedef struct QnxRawIp
+{
+    bool RawIcmp;        // AF_INET, SOCK_RAW, IPPROTO_ICMP
+    bool HasTtl;
+    bool DontFragment;
+    bool HeaderIncluded; // IP_HDRINCL is on
+    uint8_t Ttl;
+    bool HasPeer;        // "connected": see SystemNative_Connect
+    struct sockaddr_in Peer;
+} QnxRawIp;
+
+static pthread_mutex_t g_qnxRawLock = PTHREAD_MUTEX_INITIALIZER;
+static QnxRawIp* g_qnxRaw;
+static int g_qnxRawCount;
+
+// The entry for fd, the table grown to hold it if grow (g_qnxRawLock held).
+static QnxRawIp* QnxRawIpEntry(int fd, bool grow)
+{
+    if (fd < 0)
+    {
+        return NULL;
+    }
+    if (fd >= g_qnxRawCount)
+    {
+        if (!grow)
+        {
+            return NULL;
+        }
+        int count = g_qnxRawCount == 0 ? 64 : g_qnxRawCount;
+        while (count <= fd)
+        {
+            count *= 2;
+        }
+        QnxRawIp* grown = (QnxRawIp*)realloc(g_qnxRaw, (size_t)count * sizeof(QnxRawIp));
+        if (grown == NULL)
+        {
+            return NULL;
+        }
+        memset(grown + g_qnxRawCount, 0, (size_t)(count - g_qnxRawCount) * sizeof(QnxRawIp));
+        g_qnxRaw = grown;
+        g_qnxRawCount = count;
+    }
+    return &g_qnxRaw[fd];
+}
+
+static void QnxRawIpSocketCreated(int fd, int family, int type, int protocol)
+{
+    pthread_mutex_lock(&g_qnxRawLock);
+    bool rawIcmp = family == AF_INET && type == SOCK_RAW && protocol == IPPROTO_ICMP;
+    QnxRawIp* entry = QnxRawIpEntry(fd, rawIcmp);
+    if (entry != NULL)
+    {
+        memset(entry, 0, sizeof(*entry));
+        entry->RawIcmp = rawIcmp;
+    }
+    pthread_mutex_unlock(&g_qnxRawLock);
+}
+
+void QnxRawIpForget(int fd)
+{
+    pthread_mutex_lock(&g_qnxRawLock);
+    QnxRawIp* entry = QnxRawIpEntry(fd, false);
+    if (entry != NULL)
+    {
+        memset(entry, 0, sizeof(*entry));
+    }
+    pthread_mutex_unlock(&g_qnxRawLock);
+}
+
+// Remembers IP_TTL (ttl) or DontFragment (!ttl) for a raw ICMP socket;
+// returns false, remembering nothing, for any other socket.
+static bool QnxRawIpRemember(int fd, bool ttl, int value)
+{
+    bool handled = false;
+    pthread_mutex_lock(&g_qnxRawLock);
+    QnxRawIp* entry = QnxRawIpEntry(fd, false);
+    if (entry != NULL && entry->RawIcmp)
+    {
+        if (ttl)
+        {
+            entry->HasTtl = true;
+            entry->Ttl = (uint8_t)(value < 0 ? 0 : value > 255 ? 255 : value);
+        }
+        else
+        {
+            entry->DontFragment = value != 0;
+        }
+        handled = true;
+    }
+    pthread_mutex_unlock(&g_qnxRawLock);
+    return handled;
+}
+
+// For a raw ICMP socket: records the peer of a connect (true), or clears it
+// for AF_UNSPEC. False, recording nothing, for any other socket.
+static bool QnxRawIpConnect(int fd, const struct sockaddr* addr, socklen_t len)
+{
+    bool handled = false;
+    pthread_mutex_lock(&g_qnxRawLock);
+    QnxRawIp* entry = QnxRawIpEntry(fd, false);
+    if (entry != NULL && entry->RawIcmp)
+    {
+        if (addr->sa_family == AF_INET && len >= (socklen_t)sizeof(struct sockaddr_in))
+        {
+            memcpy(&entry->Peer, addr, sizeof(struct sockaddr_in));
+            entry->HasPeer = true;
+            handled = true;
+        }
+        else if (addr->sa_family == AF_UNSPEC)
+        {
+            entry->HasPeer = false;
+            handled = true;
+        }
+    }
+    pthread_mutex_unlock(&g_qnxRawLock);
+    return handled;
+}
+
+// The recorded peer of a raw ICMP socket, if it has one.
+static bool QnxRawIpPeer(int fd, struct sockaddr_in* peer)
+{
+    bool found = false;
+    pthread_mutex_lock(&g_qnxRawLock);
+    QnxRawIp* entry = QnxRawIpEntry(fd, false);
+    if (entry != NULL && entry->RawIcmp && entry->HasPeer)
+    {
+        *peer = entry->Peer;
+        found = true;
+    }
+    pthread_mutex_unlock(&g_qnxRawLock);
+    return found;
+}
+
+// Whether a send on fd needs an IP header, and its TTL and DF. Turns
+// IP_HDRINCL on at the first such send.
+static bool QnxRawIpHeaderNeeded(int fd, uint8_t* ttl, bool* dontFragment)
+{
+    bool needed = false;
+    pthread_mutex_lock(&g_qnxRawLock);
+    QnxRawIp* entry = QnxRawIpEntry(fd, false);
+    if (entry != NULL && entry->RawIcmp && (entry->HasTtl || entry->DontFragment))
+    {
+        if (!entry->HeaderIncluded)
+        {
+            int on = 1;
+            entry->HeaderIncluded = setsockopt(fd, IPPROTO_IP, IP_HDRINCL, &on, sizeof(on)) == 0;
+        }
+        if (entry->HeaderIncluded)
+        {
+            int current = 64;
+            socklen_t len = sizeof(current);
+            if (!entry->HasTtl && getsockopt(fd, IPPROTO_IP, IP_TTL, &current, &len) != 0)
+            {
+                current = 64;
+            }
+            *ttl = entry->HasTtl ? entry->Ttl : (uint8_t)current;
+            *dontFragment = entry->DontFragment;
+            needed = true;
+        }
+    }
+    pthread_mutex_unlock(&g_qnxRawLock);
+    return needed;
+}
+#endif
+
 int32_t SystemNative_SendMessage(intptr_t socket, MessageHeader* messageHeader, int32_t flags, int64_t* sent)
 {
     if (messageHeader == NULL || sent == NULL || messageHeader->SocketAddressLen < 0 ||
@@ -1722,6 +1928,58 @@ int32_t SystemNative_SendMessage(intptr_t socket, MessageHeader* messageHeader, 
 #if defined(CMSG_SPACE)
     struct msghdr header;
     ConvertMessageHeaderToMsghdr(&header, messageHeader, fd);
+#if defined(__QNXNTO__)
+    // A raw ICMP socket "connected" by SystemNative_Connect: no address means
+    // its recorded peer.
+    struct sockaddr_in rawPeer;
+    if (header.msg_name == NULL && QnxRawIpPeer(fd, &rawPeer))
+    {
+        header.msg_name = &rawPeer;
+        header.msg_namelen = sizeof(rawPeer);
+    }
+    // A raw ICMP socket with a TTL or DF: its own IP header in front (above).
+    struct ip ipHeader;
+    struct iovec* withHeader = NULL;
+    uint8_t ipTtl;
+    bool ipDontFragment;
+    if (QnxRawIpHeaderNeeded(fd, &ipTtl, &ipDontFragment))
+    {
+        size_t payload = 0;
+        for (size_t i = 0; i < (size_t)header.msg_iovlen; i++)
+        {
+            payload += header.msg_iov[i].iov_len;
+        }
+        const struct sockaddr_in* to = (const struct sockaddr_in*)header.msg_name;
+        if (to == NULL || header.msg_namelen < (socklen_t)sizeof(struct sockaddr_in) || to->sin_family != AF_INET)
+        {
+            to = NULL; // no destination for the header
+        }
+        withHeader = (struct iovec*)malloc(((size_t)header.msg_iovlen + 1) * sizeof(struct iovec));
+        if (to == NULL || withHeader == NULL || payload > 65535 - sizeof(struct ip))
+        {
+            free(withHeader);
+            *sent = 0;
+            return Error_EINVAL;
+        }
+        memset(&ipHeader, 0, sizeof(ipHeader));
+        ipHeader.ip_v = 4;
+        ipHeader.ip_hl = sizeof(struct ip) >> 2;
+        // ip_len and ip_off in host byte order, as QNX 6.5 takes them with
+        // IP_HDRINCL (measured: a header built so reached the gateway, and
+        // with IP_DF a 3,000-byte one failed with EMSGSIZE). ip_id, ip_sum and
+        // ip_src are left 0 for the stack to fill.
+        ipHeader.ip_len = (uint16_t)(sizeof(struct ip) + payload);
+        ipHeader.ip_off = ipDontFragment ? IP_DF : 0;
+        ipHeader.ip_ttl = ipTtl;
+        ipHeader.ip_p = IPPROTO_ICMP;
+        ipHeader.ip_dst = to->sin_addr;
+        withHeader[0].iov_base = &ipHeader;
+        withHeader[0].iov_len = sizeof(struct ip);
+        memcpy(withHeader + 1, header.msg_iov, (size_t)header.msg_iovlen * sizeof(struct iovec));
+        header.msg_iov = withHeader;
+        header.msg_iovlen++;
+    }
+#endif
 
 #if defined(__APPLE__) && __APPLE__
     // possible OSX kernel bug: https://github.com/dotnet/runtime/issues/27221
@@ -1745,6 +2003,16 @@ int32_t SystemNative_SendMessage(intptr_t socket, MessageHeader* messageHeader, 
         header.msg_name = NULL;
         header.msg_namelen = 0;
         while ((res = sendmsg(fd, &header, socketFlags)) < 0 && errno == EINTR);
+    }
+    if (withHeader != NULL)
+    {
+        int savedErrno = errno;
+        free(withHeader);
+        errno = savedErrno;
+        if (res >= (ssize_t)sizeof(struct ip))
+        {
+            res -= (ssize_t)sizeof(struct ip); // the caller's bytes only
+        }
     }
 #endif
 #else // CMSG_SPACE
@@ -1890,6 +2158,16 @@ int32_t SystemNative_Connect(intptr_t socket, uint8_t* socketAddress, int32_t so
 
     int fd = ToFileDescriptor(socket);
 
+#if defined(__QNXNTO__)
+    // A raw ICMP socket stays unconnected; its peer is recorded instead (see
+    // QnxRawIp).
+    if ((size_t)socketAddressLen >= sizeof(sa_family_t) &&
+        QnxRawIpConnect(fd, (const struct sockaddr*)socketAddress, (socklen_t)socketAddressLen))
+    {
+        return Error_SUCCESS;
+    }
+#endif
+
     int err;
     while ((err = connect(fd, (struct sockaddr*)socketAddress, (socklen_t)socketAddressLen)) < 0 && errno == EINTR);
     if (err != 0)
@@ -1959,6 +2237,18 @@ int32_t SystemNative_GetPeerName(intptr_t socket, uint8_t* socketAddress, int32_
     }
 
     int fd = ToFileDescriptor(socket);
+
+#if defined(__QNXNTO__)
+    // The recorded peer of a raw ICMP socket (see QnxRawIp).
+    struct sockaddr_in rawPeer;
+    if (QnxRawIpPeer(fd, &rawPeer))
+    {
+        size_t copied = (size_t)*socketAddressLen < sizeof(rawPeer) ? (size_t)*socketAddressLen : sizeof(rawPeer);
+        memcpy(socketAddress, &rawPeer, copied);
+        *socketAddressLen = (int32_t)sizeof(rawPeer);
+        return Error_SUCCESS;
+    }
+#endif
 
     socklen_t addrLen = (socklen_t)*socketAddressLen;
     int err = getpeername(fd, (struct sockaddr*)socketAddress, &addrLen);
@@ -2581,8 +2871,23 @@ SystemNative_SetSockOpt(intptr_t socket, int32_t socketOptionLevel, int32_t sock
     }
 #endif
 
+#if defined(__QNXNTO__)
+    // TTL and DontFragment on a raw ICMP socket: remembered for its own IP
+    // header (see QnxRawIpHeaderNeeded). The TTL is set on the socket too.
+    if (socketOptionLevel == SocketOptionLevel_SOL_IP && optionLen >= 1 &&
+        (socketOptionName == SocketOptionName_SO_IP_TTL || socketOptionName == SocketOptionName_SO_IP_DONTFRAGMENT))
+    {
+        int value = optionLen >= (int32_t)sizeof(int) ? *(int*)optionValue : *optionValue;
+        if (QnxRawIpRemember(fd, socketOptionName == SocketOptionName_SO_IP_TTL, value) &&
+            socketOptionName == SocketOptionName_SO_IP_DONTFRAGMENT)
+        {
+            return Error_SUCCESS;
+        }
+    }
+#endif
+
 #if defined(__QNXNTO__) && !defined(IP_MTU_DISCOVER) && !defined(IP_DONTFRAG)
-    // QNX 6.5 has no option for the DF bit, and leaves it clear on raw and UDP
+    // Other sockets: QNX 6.5 has no option for the DF bit, and leaves it clear on raw and UDP
     // sockets (measured on QNX 6.5: a 3,000-byte ICMP echo and UDP datagram go
     // out fragmented through a 1,500-byte interface), so "don't set DF" is what
     // it does already; DF itself stays unsupported. .NET's Ping sets
@@ -2974,6 +3279,15 @@ int32_t SystemNative_Socket(int32_t addressFamily, int32_t socketType, int32_t p
 
 #ifndef SOCK_CLOEXEC
     fcntl(ToFileDescriptor(*createdSocket), F_SETFD, FD_CLOEXEC); // ignore any failures; this is best effort
+#endif
+#if defined(__QNXNTO__)
+    QnxRawIpSocketCreated(ToFileDescriptor(*createdSocket), platformAddressFamily,
+#ifdef SOCK_CLOEXEC
+                          platformSocketType & ~SOCK_CLOEXEC,
+#else
+                          platformSocketType,
+#endif
+                          platformProtocolType);
 #endif
     return Error_SUCCESS;
 }
