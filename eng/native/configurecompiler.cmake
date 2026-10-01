@@ -659,7 +659,8 @@ if (CLR_CMAKE_HOST_UNIX OR CLR_CMAKE_HOST_WASI)
     endif()
   endif()
 
-  if(NOT CLR_CMAKE_HOST_BROWSER AND NOT CLR_CMAKE_HOST_WASI)
+  # QNX 6.5's libc has no stack-protector runtime (__stack_chk_guard, __stack_chk_fail).
+  if(NOT CLR_CMAKE_HOST_BROWSER AND NOT CLR_CMAKE_HOST_WASI AND NOT CLR_CMAKE_HOST_QNX)
     add_compile_options(-fstack-protector-strong)
   endif()
 
@@ -681,6 +682,17 @@ if (CLR_CMAKE_HOST_UNIX OR CLR_CMAKE_HOST_WASI)
   if (PRERELEASE)
     add_compile_options(-Werror)
   endif(PRERELEASE)
+
+  if(CLR_CMAKE_HOST_QNX)
+    # Upstream's code assumes Linux's types: QNX's uid_t and gid_t are signed
+    # and QNX 6.5's time_t is unsigned, so conversions that are exact there are
+    # sign or width changes here. QNX's <sys/resource.h> declares getrlimit and
+    # setrlimit through Watcom #pragma aux aliases, and BlackBerry 10's
+    # byte-order macros are GNU statement expressions. Those classes stay
+    # warnings on QNX; every other warning stops a QNX build as it stops others.
+    add_compile_options(-Wno-error=sign-conversion -Wno-error=pointer-sign -Wno-error=implicit-int-conversion
+                        -Wno-error=used-but-marked-unused -Wno-error=gnu-statement-expression-from-macro-expansion)
+  endif()
 
   # Disabled common warnings
   add_compile_options(-Wno-unused-variable)
