@@ -94,6 +94,8 @@ append_extra_system_libs(NATIVE_LIBS_EXTRA)
 if (CLR_CMAKE_TARGET_QNX)
     # Linux-format /proc files for the Linux managed libraries.
     list (APPEND NATIVE_SOURCES pal_procfs_qnx.c)
+    # inotify, which QNX lacks, by polling: FileSystemWatcher, Get-Content -Wait.
+    list (APPEND NATIVE_SOURCES pal_inotify_qnx.c)
 endif ()
 
 if (CLR_CMAKE_TARGET_ANDROID AND NOT HAVE_GETIFADDRS)
