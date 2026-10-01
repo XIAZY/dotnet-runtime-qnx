@@ -4226,6 +4226,28 @@ mono_method_check_inlining (MonoCompile *cfg, MonoMethod *method)
 	return TRUE;
 }
 
+/*
+ * cctor_initializes_class_at_access:
+ *
+ *   Whether a static field of the beforefieldinit class KLASS, accessed from the
+ * method being compiled, has its class initialized at the access instead of when
+ * the method is compiled or its AOT code is loaded. That is the case in the static
+ * constructor of another class: two classes' static constructors can depend on
+ * each other, and initializing KLASS before the constructor has run any of its
+ * code lets KLASS's constructor see the other class's fields still unset (for
+ * example a field of KLASS initialized from a field the constructor sets first).
+ * The interpreter and CoreCLR initialize at the access.
+ */
+static gboolean
+cctor_initializes_class_at_access (MonoCompile *cfg, MonoClass *klass)
+{
+	MonoMethod *method = cfg->method;
+
+	return mono_class_is_before_field_init (klass) && klass != method->klass &&
+		(method->flags & METHOD_ATTRIBUTE_STATIC) && (method->flags & METHOD_ATTRIBUTE_SPECIAL_NAME) &&
+		!strcmp (method->name, ".cctor");
+}
+
 static gboolean
 mini_field_access_needs_cctor_run (MonoCompile *cfg, MonoMethod *method, MonoClass *klass, MonoVTable *vtable)
 {
@@ -4236,7 +4258,7 @@ mini_field_access_needs_cctor_run (MonoCompile *cfg, MonoMethod *method, MonoCla
 	}
 
 	if (mono_class_is_before_field_init (klass)) {
-		if (cfg->method == method)
+		if (cfg->method == method && !cctor_initializes_class_at_access (cfg, klass))
 			return FALSE;
 	}
 
@@ -10530,7 +10552,13 @@ calli_end:
 							}
 						}
 					}
-					if (cfg->compile_aot)
+					if (cfg->compile_aot && cctor_initializes_class_at_access (cfg, klass)) {
+						/* Resolving an SFLDA patch would initialize the class when the code is loaded */
+						MonoInst *iargs [1];
+
+						EMIT_NEW_FIELDCONST (cfg, iargs [0], field);
+						ins = mono_emit_jit_icall (cfg, mono_class_static_field_address, iargs);
+					} else if (cfg->compile_aot)
 						EMIT_NEW_SFLDACONST (cfg, ins, field);
 					else {
 						g_assert (vtable);
