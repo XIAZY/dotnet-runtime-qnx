@@ -10,6 +10,9 @@
 #include "pal_utilities.h"
 #include "pal_safecrt.h"
 #include "pal_types.h"
+#if defined(__QNXNTO__)
+#include "pal_inotify_qnx.h"
+#endif
 
 #include <minipal/random.h>
 
@@ -1616,6 +1619,8 @@ intptr_t SystemNative_INotifyInit(void)
 {
 #if HAVE_INOTIFY
     return inotify_init1(IN_CLOEXEC);
+#elif defined(__QNXNTO__)
+    return QnxINotifyInit();
 #else
     errno = ENOTSUP;
     return -1;
@@ -1632,6 +1637,8 @@ int32_t SystemNative_INotifyAddWatch(intptr_t fd, const char* pathName, uint32_t
     mask &= ~((uint32_t)PAL_IN_EXCL_UNLINK);
 #endif
     return inotify_add_watch(ToFileDescriptor(fd), pathName, mask);
+#elif defined(__QNXNTO__)
+    return QnxINotifyAddWatch(fd, pathName, mask);
 #else
     (void)fd, (void)pathName, (void)mask;
     errno = ENOTSUP;
@@ -1652,6 +1659,8 @@ int32_t SystemNative_INotifyRemoveWatch(intptr_t fd, int32_t wd)
 #else
         wd);
 #endif
+#elif defined(__QNXNTO__)
+    return QnxINotifyRemoveWatch(fd, wd);
 #else
     (void)fd, (void)wd;
     errno = ENOTSUP;
