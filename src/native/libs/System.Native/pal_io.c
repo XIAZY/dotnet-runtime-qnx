@@ -9,6 +9,8 @@
 #include "pal_safecrt.h"
 #include "pal_types.h"
 
+#include <minipal/random.h>
+
 #include <assert.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -851,9 +853,12 @@ intptr_t SystemNative_MksTemps(char* pathTemplate, int32_t suffixLength)
 #if HAVE_MKSTEMPS
     while ((result = mkstemps(pathTemplate, suffixLength)) < 0 && errno == EINTR);
 #elif HAVE_MKSTEMP
-    // mkstemps is not available bionic/Android, but mkstemp is
-    // mkstemp doesn't allow the suffix that msktemps does allow, so we'll need to
-    // remove that before passisng pathTemplate to mkstemp
+    // mkstemps is not available everywhere (bionic/Android, QNX), and mkstemp
+    // cannot keep a suffix: a name made by mkstemp from the template cut at the
+    // suffix is not the name the caller gets back. So the file is made here as
+    // mkstemps would make it: the six X's before the suffix replaced with
+    // random characters, opened with O_CREAT | O_EXCL, and tried again with
+    // other characters if that name exists.
 
     int32_t pathTemplateLength = (int32_t)strlen(pathTemplate);
 
@@ -865,25 +870,35 @@ intptr_t SystemNative_MksTemps(char* pathTemplate, int32_t suffixLength)
         return -1;
     }
 
-    // Make mkstemp ignore the suffix by setting the first char of the suffix to \0,
-    // if there is a suffix
-    int32_t firstSuffixIndex = 0;
-    char firstSuffixChar = 0;
-
-    if (suffixLength > 0)
+    char* randomPart = pathTemplate + pathTemplateLength - suffixLength - 6;
+    for (int i = 0; i < 6; i++)
     {
-        firstSuffixIndex = pathTemplateLength - suffixLength;
-        firstSuffixChar = pathTemplate[firstSuffixIndex];
-        pathTemplate[firstSuffixIndex] = 0;
+        if (randomPart[i] != 'X')
+        {
+            errno = EINVAL;
+            return -1;
+        }
     }
 
-    while ((result = mkstemp(pathTemplate)) < 0 && errno == EINTR);
-
-    // Reset the first char of the suffix back to its original value, if there is a suffix
-    if (suffixLength > 0)
+    static const char nameChars[] = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    const int maxAttempts = 100;
+    result = -1;
+    for (int attempt = 0; attempt < maxAttempts; attempt++)
     {
-        pathTemplate[firstSuffixIndex] = firstSuffixChar;
+        uint8_t randomBytes[6];
+        minipal_get_non_cryptographically_secure_random_bytes(randomBytes, (int32_t)sizeof(randomBytes));
+        for (int i = 0; i < 6; i++)
+        {
+            randomPart[i] = nameChars[randomBytes[i] % (sizeof(nameChars) - 1)];
+        }
+
+        while ((result = open(pathTemplate, O_CREAT | O_EXCL | O_RDWR, S_IRUSR | S_IWUSR)) < 0 && errno == EINTR);
+        if (result >= 0 || errno != EEXIST)
+        {
+            break;
+        }
     }
+    // After maxAttempts names that all exist, errno is EEXIST, as from mkstemps.
 #elif TARGET_WASI
     assert_msg(false, "Not supported on WASI", 0);
     result = -1;
