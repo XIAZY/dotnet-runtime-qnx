@@ -634,6 +634,11 @@ create_thread_object (void)
 	return thread;
 }
 
+#if defined(HOST_QNX)
+/* The priority that MONO_THREAD_PRIORITY_NORMAL maps to; see mono_thread_init. */
+static int normal_priority = 10;
+#endif
+
 static void
 mono_thread_internal_set_priority (MonoInternalThread *internal, MonoThreadPriority priority)
 {
@@ -678,6 +683,50 @@ mono_thread_internal_set_priority (MonoInternalThread *internal, MonoThreadPrior
 #elif HOST_WASI
 	// Thread scheduling isn't yet implemented in the WASI build
 	return;
+#elif defined(HOST_QNX)
+	/*
+	 * QNX's priorities run from 1 to 255 (1 to 63 for other users than root),
+	 * and the system's own services run inside that range (the network stack
+	 * at 21, for example), while threads start at 10. Spreading .NET's five
+	 * levels over the whole range, as below, would put Normal at 128, above
+	 * every service, and a busy managed thread would starve them. Normal is
+	 * instead the priority of the thread that started the runtime, and each
+	 * level above or below it one more or less.
+	 */
+	pthread_t tid;
+	int policy, min, max;
+	struct sched_param param = {0,};
+	gint res;
+
+	tid = thread_get_tid (internal);
+
+	MONO_ENTER_GC_SAFE;
+	res = pthread_getschedparam (tid, &policy, &param);
+	MONO_EXIT_GC_SAFE;
+	if (res != 0)
+		g_error ("%s: pthread_getschedparam failed, error: \"%s\" (%d)", __func__, g_strerror (res), res);
+
+	min = sched_get_priority_min (policy);
+	max = sched_get_priority_max (policy);
+	if ((min == -1) || (max == -1))
+		return;
+
+	param.sched_priority = normal_priority + ((int)priority - MONO_THREAD_PRIORITY_NORMAL);
+	if (param.sched_priority < min)
+		param.sched_priority = min;
+	if (param.sched_priority > max)
+		param.sched_priority = max;
+
+	MONO_ENTER_GC_SAFE;
+	res = pthread_setschedparam (tid, policy, &param);
+	MONO_EXIT_GC_SAFE;
+	if (res != 0) {
+		if (res == EPERM) {
+			g_warning ("%s: pthread_setschedparam failed, error: \"%s\" (%d)", __func__, g_strerror (res), res);
+			return;
+		}
+		g_error ("%s: pthread_setschedparam failed, error: \"%s\" (%d)", __func__, g_strerror (res), res);
+	}
 #else /* !HOST_WIN32 and not HOST_FUCHSIA */
 	pthread_t tid;
 	int policy = SCHED_OTHER;
@@ -2583,6 +2632,18 @@ void mono_thread_init (MonoThreadStartCB start_cb,
 	mono_thread_start_cb = start_cb;
 	mono_thread_attach_cb = attach_cb;
 
+#if defined(HOST_QNX)
+	/*
+	 * Taken once, from the thread starting the runtime, so that a thread
+	 * created at another level does not shift the levels of later ones.
+	 */
+	{
+		int policy;
+		struct sched_param param;
+		if (pthread_getschedparam (pthread_self (), &policy, &param) == 0)
+			normal_priority = param.sched_priority;
+	}
+#endif
 }
 
 static gpointer
