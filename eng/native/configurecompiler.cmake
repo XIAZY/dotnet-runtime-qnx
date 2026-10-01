@@ -659,7 +659,8 @@ if (CLR_CMAKE_HOST_UNIX OR CLR_CMAKE_HOST_WASI)
     endif()
   endif()
 
-  if(NOT CLR_CMAKE_HOST_BROWSER AND NOT CLR_CMAKE_HOST_WASI)
+  # QNX 6.5's libc has no stack-protector runtime (__stack_chk_guard, __stack_chk_fail).
+  if(NOT CLR_CMAKE_HOST_BROWSER AND NOT CLR_CMAKE_HOST_WASI AND NOT CLR_CMAKE_HOST_QNX)
     add_compile_options(-fstack-protector-strong)
   endif()
 
