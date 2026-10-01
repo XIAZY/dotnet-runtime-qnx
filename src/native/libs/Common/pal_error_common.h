@@ -7,6 +7,7 @@
 #include "pal_types.h"
 #include "pal_config.h"
 #include "pal_utilities.h"
+#include <stdio.h>
 #include <string.h>
 #include <assert.h>
 #include <errno.h>
@@ -606,6 +607,7 @@ inline static const char* StrErrorR(int32_t platformErrno, char* buffer, int32_t
     assert(message != NULL);
     return message;
 #else
+    buffer[0] = '\0';
     int error = strerror_r(platformErrno, buffer, (uint32_t) bufferSize);
     if (error == ERANGE)
     {
@@ -615,9 +617,14 @@ inline static const char* StrErrorR(int32_t platformErrno, char* buffer, int32_t
     }
 
     // The only other valid error codes are 0 for success or EINVAL for
-    // an unknown error, but in the latter case a reasonable string (e.g
-    // "Unknown error: 0x123") is returned.
+    // an unknown error. Most C libraries still write a reasonable string
+    // (e.g "Unknown error: 0x123") for EINVAL, but POSIX does not require
+    // it, and some leave the buffer as it was (QNX), so write one here.
     assert_err(error == 0 || error == EINVAL, "invalid error", error);
+    if (error != 0 && buffer[0] == '\0')
+    {
+        snprintf(buffer, (size_t)bufferSize, "Unknown error %d", platformErrno);
+    }
     return buffer;
 #endif
 }
