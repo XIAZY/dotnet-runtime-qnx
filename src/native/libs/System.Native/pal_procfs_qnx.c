@@ -20,6 +20,10 @@
 //   DCMD_PROC_PAGEDATA       pages present (VmRSS, the stat rss field)
 //   the "as" file itself     argv, read from the process's initial stack
 //
+// /proc/net/route, the IPv4 routing table System.Net.NetworkInformation reads
+// for gateway addresses, comes from the routing table through
+// sysctl(NET_RT_DUMP), which reads it without a routing socket.
+//
 // The descriptor is an unlinked shared memory object: it seeks and supports
 // pread, as .NET needs for a file that is not a regular one. Times use the
 // boot time of SystemNative_GetBootTimeTicks (realtime minus monotonic) and
@@ -31,6 +35,12 @@
 
 #include <devctl.h>
 #include <errno.h>
+#include <ifaddrs.h>
+#include <net/if.h>
+#include <net/route.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <sys/sysctl.h>
 #include <fcntl.h>
 #include <stdarg.h>
 #include <stdbool.h>
@@ -402,6 +412,121 @@ static void QnxRenderMaps(int as, bool self, QnxText* text)
     free(maps);
 }
 
+// Linux's /proc/net/route: the main table's IPv4 routes, one line each, the
+// addresses as the hexadecimal of the in_addr's 32 bits as stored, every line
+// padded to 127 characters. From BSD's routing table: ARP and cloned entries
+// are left out, and so are routes through loopback interfaces, which Linux
+// keeps in its local table. RefCnt, Metric, MTU, Window and IRTT have no
+// counterpart and are 0.
+static void QnxRenderNetRoute(QnxText* text)
+{
+    char line[256];
+    snprintf(line, sizeof(line), "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT");
+    QnxPrintf(text, "%-127s\n", line);
+
+    int mib[6] = { CTL_NET, PF_ROUTE, 0, AF_INET, NET_RT_DUMP, 0 };
+    size_t needed = 0;
+    if (sysctl(mib, 6, NULL, &needed, NULL, 0) != 0 || needed == 0)
+        return;
+    char* buffer = (char*)malloc(needed);
+    if (buffer == NULL || sysctl(mib, 6, buffer, &needed, NULL, 0) != 0)
+    {
+        free(buffer);
+        return;
+    }
+
+    struct ifaddrs* interfaces = NULL;
+    getifaddrs(&interfaces);
+
+    for (char* next = buffer; next + sizeof(struct rt_msghdr) <= buffer + needed;)
+    {
+        struct rt_msghdr* message = (struct rt_msghdr*)next;
+        if (message->rtm_msglen == 0)
+            break;
+        next += message->rtm_msglen;
+        if (message->rtm_version != RTM_VERSION || (message->rtm_flags & RTF_UP) == 0)
+            continue;
+#ifdef RTF_LLINFO
+        if (message->rtm_flags & RTF_LLINFO)
+            continue;
+#endif
+#ifdef RTF_CLONED
+        if (message->rtm_flags & RTF_CLONED)
+            continue;
+#endif
+
+        // The addresses follow the header, each rounded up to a long.
+        struct sockaddr* addresses[RTAX_MAX] = { 0 };
+        char* sa = (char*)(message + 1);
+        for (int i = 0; i < RTAX_MAX; i++)
+        {
+            if ((message->rtm_addrs & (1 << i)) == 0)
+                continue;
+            struct sockaddr* address = (struct sockaddr*)sa;
+            if (sa >= next)
+                break;
+            addresses[i] = address;
+            size_t length = address->sa_len > 0 ? (size_t)address->sa_len : sizeof(long);
+            sa += (length + sizeof(long) - 1) & ~(sizeof(long) - 1);
+        }
+
+        struct sockaddr_in destination, gateway, mask;
+        memset(&destination, 0, sizeof(destination));
+        memset(&gateway, 0, sizeof(gateway));
+        memset(&mask, 0, sizeof(mask));
+        if (addresses[RTAX_DST] == NULL || addresses[RTAX_DST]->sa_family != AF_INET)
+            continue;
+        memcpy(&destination, addresses[RTAX_DST], addresses[RTAX_DST]->sa_len < sizeof(destination) ? addresses[RTAX_DST]->sa_len : sizeof(destination));
+        if (addresses[RTAX_GATEWAY] != NULL && addresses[RTAX_GATEWAY]->sa_family == AF_INET)
+            memcpy(&gateway, addresses[RTAX_GATEWAY], sizeof(gateway));
+        if (addresses[RTAX_NETMASK] != NULL)
+        {
+            // A netmask may be shortened to its significant bytes.
+            size_t length = addresses[RTAX_NETMASK]->sa_len;
+            memcpy(&mask, addresses[RTAX_NETMASK], length < sizeof(mask) ? length : sizeof(mask));
+        }
+        else if (message->rtm_flags & RTF_HOST)
+        {
+            mask.sin_addr.s_addr = 0xffffffffu;
+        }
+
+        char name[IF_NAMESIZE] = "";
+        if (if_indextoname(message->rtm_index, name) == NULL)
+            continue;
+        bool loopback = false;
+        for (struct ifaddrs* i = interfaces; i != NULL; i = i->ifa_next)
+        {
+            if (strcmp(i->ifa_name, name) == 0 && (i->ifa_flags & IFF_LOOPBACK))
+                loopback = true;
+        }
+        if (loopback)
+            continue;
+
+        unsigned flags = 0x0001; // RTF_UP
+        if (message->rtm_flags & RTF_GATEWAY)
+            flags |= 0x0002;
+        if (message->rtm_flags & RTF_HOST)
+            flags |= 0x0004;
+        if (message->rtm_flags & RTF_DYNAMIC)
+            flags |= 0x0010;
+        if (message->rtm_flags & RTF_MODIFIED)
+            flags |= 0x0020;
+        if (message->rtm_flags & RTF_REJECT)
+            flags |= 0x0200;
+
+        snprintf(line, sizeof(line), "%s\t%08X\t%08X\t%04X\t%d\t%u\t%d\t%08X\t%d\t%u\t%u", name,
+                 (unsigned)destination.sin_addr.s_addr, (unsigned)gateway.sin_addr.s_addr, flags, 0,
+                 (unsigned)message->rtm_use, 0, (unsigned)mask.sin_addr.s_addr, 0, 0u, 0u);
+        QnxPrintf(text, "%-127s\n", line);
+    }
+
+    if (interfaces != NULL)
+        freeifaddrs(interfaces);
+    free(buffer);
+}
+
+static const char QnxNetRoutePath[] = "/proc/net/route";
+
 // Returns an unlinked shared memory object holding the text, positioned at 0.
 static int QnxDescriptorFor(const QnxText* text)
 {
@@ -432,6 +557,23 @@ static int QnxDescriptorFor(const QnxText* text)
 
 int32_t QnxProcfsOpen(const char* path, int32_t* fd)
 {
+    if (path != NULL && strcmp(path, QnxNetRoutePath) == 0)
+    {
+        QnxText route = { 0 };
+        QnxRenderNetRoute(&route);
+        if (route.failed)
+        {
+            errno = ENOMEM;
+            *fd = -1;
+        }
+        else
+        {
+            *fd = QnxDescriptorFor(&route);
+        }
+        free(route.data);
+        return 1;
+    }
+
     pid_t pid;
     QnxProcfsKind kind = QnxProcfsParse(path, &pid);
     if (kind == QnxProcfsFileNone || kind == QnxProcfsFileExe)
@@ -477,6 +619,17 @@ int32_t QnxProcfsOpen(const char* path, int32_t* fd)
 
 int32_t QnxProcfsStat(const char* path, struct stat64* st)
 {
+    if (path != NULL && strcmp(path, QnxNetRoutePath) == 0)
+    {
+        // As Linux reports it: regular, read-only, empty, root's.
+        memset(st, 0, sizeof(*st));
+        st->st_mode = S_IFREG | 0444;
+        st->st_nlink = 1;
+        st->st_blksize = QnxPageSize;
+        st->st_atime = st->st_mtime = st->st_ctime = time(NULL);
+        return 1;
+    }
+
     pid_t pid;
     QnxProcfsKind kind = QnxProcfsParse(path, &pid);
     if (kind == QnxProcfsFileNone)
