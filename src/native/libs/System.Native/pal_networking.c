@@ -3845,8 +3845,10 @@ static int32_t WaitForSocketEventsInner(int32_t port, SocketEvent* buffer, int32
 // at once. Measured on QNX 6.5.0: POLLARM arms for input and for output coexist on one
 // descriptor and with other processes' select() and poll() on the same
 // file, whereas _NOTIFY_ACTION_TRANARM fails with EBUSY when another process
-// is already waiting in select(). Registering posts one event for each
-// direction, since nothing is armed until an operation meets EAGAIN.
+// is already waiting in select(). Registering arms each direction the same
+// way, posting the event at once for a direction that is ready already, so
+// that an operation that met EAGAIN or EINPROGRESS before the registration
+// is reported too.
 //
 // A pulse's value is the descriptor and a registration sequence number, so
 // that pulses from an earlier registration of the same descriptor number are
@@ -4004,6 +4006,24 @@ static bool QnxReserve(int fd)
     return true;
 }
 
+// Arms one direction of fd with POLLARM, or posts its pulse at once if the
+// condition is met already or the descriptor cannot be armed (a resource
+// manager without notification support): the engine then retries the
+// operation and meets the real result. Called without g_qnxLock: ionotify
+// is a kernel call that can block. One ionotify per direction, since a
+// sigevent carries one pulse code; input and output arms coexist on a
+// descriptor (measured on QNX 6.5.0).
+static void QnxArmOrPost(int fd, int32_t connection, int code, int condition, int value)
+{
+    struct sigevent event;
+    SIGEV_PULSE_INIT(&event, connection, SIGEV_PULSE_PRIO_INHERIT, code, value);
+    int result = ionotify(fd, _NOTIFY_ACTION_POLLARM, condition, &event);
+    if (result == -1 || (result & condition) != 0)
+    {
+        MsgSendPulse(connection, -1, code, value);
+    }
+}
+
 static int32_t TryChangeSocketEventRegistrationInner(
     int32_t port, int32_t socket, SocketEvents currentEvents, SocketEvents newEvents, uintptr_t data)
 {
@@ -4055,15 +4075,20 @@ static int32_t TryChangeSocketEventRegistrationInner(
     int value = QnxPulseValue(socket, registration->Sequence);
     pthread_mutex_unlock(&g_qnxLock);
 
-    // Nothing is armed until an operation meets EAGAIN, and the descriptor may
-    // be ready already: report both directions once.
+    // Arm each requested direction now, as epoll does at registration: report
+    // what is ready already and notify when the rest becomes ready. An
+    // operation that met EAGAIN or EINPROGRESS before the registration (a
+    // connect, above all) was not armed by its shim, and .NET may then wait
+    // after a plain poll(), which arms nothing (TryCompleteConnect): without
+    // the arm here, a connect that completes after the registration was never
+    // reported. After the registration, the shims arm on EAGAIN as before.
     if ((newEvents & SocketEvents_SA_READ) != 0)
     {
-        MsgSendPulse(connection, -1, QnxPulseRead, value);
+        QnxArmOrPost(socket, connection, QnxPulseRead, _NOTIFY_COND_INPUT, value);
     }
     if ((newEvents & SocketEvents_SA_WRITE) != 0)
     {
-        MsgSendPulse(connection, -1, QnxPulseWrite, value);
+        QnxArmOrPost(socket, connection, QnxPulseWrite, _NOTIFY_COND_OUTPUT, value);
     }
     return Error_SUCCESS;
 }
