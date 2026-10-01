@@ -6,6 +6,17 @@
  * in place of the dotnet host (C++), which QNX cannot run.
  *
  *     qnxhost <program.props> [program arguments...]
+ *     <program> [program arguments...]
+ *
+ * The second form is multi-call: a copy of this executable under another
+ * name (an install tree has one at <tree>/<program>/<program>, pwsh/pwsh for
+ * PowerShell) reads <tree>/<program>.props, found from the executable's own
+ * path as the process manager reports it, resolved (never from argv[0], so
+ * that a symlink, a PATH lookup or a login shell's "-pwsh" all find it).
+ * The program then sees itself as that executable: Environment.ProcessPath,
+ * the process's name, and the path PowerShell restarts itself with (jobs,
+ * -Login) are <tree>/pwsh/pwsh, as with the dotnet host on Linux. A symlink
+ * to qnxhost resolves to qnxhost, so it must be a copy, not a link.
  *
  * program.props is written when the program is deployed. Each line is
  * KEY=VALUE; "$ROOT" in a value stands for the directory of the props file.
@@ -59,15 +70,19 @@
  */
 #include <dlfcn.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <malloc.h>
 #include <pthread.h>
 #include <signal.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <libgen.h>
+#include <sys/procfs.h>
 
 #include <mono/jit/details/jit-types.h> /* MonoAotMode */
 
@@ -193,6 +208,108 @@ static void *signal_thread(void *arg)
 	return NULL;
 }
 
+/*
+ * P/Invoke override (Mono's PINVOKE_OVERRIDE host property): two entry
+ * points of "libc" that PowerShell imports directly, bypassing System.Native,
+ * get QNX versions; every other pair resolves as usual (NULL).
+ *
+ * readlink: PowerShell's login code (AttemptExecPwshLogin) reads
+ * /proc/self/exe, which QNX does not have; that path is answered from the
+ * process manager, others go to libc.
+ *
+ * execv: the login code then runs /bin/sh -l -c 'exec <pwsh> "$@"' "" <args>.
+ * QNX 6.5's ksh drops the positional parameters of -c when -l is given
+ * (measured: `sh -l -c 'echo $#' "" a b` prints 0; without -l, 2), so pwsh
+ * restarted with no arguments. That one call is rewritten to put the quoted
+ * arguments in the command string itself; any other execv goes to libc.
+ */
+static char *own_path(void);
+
+static ssize_t qnx_readlink(const char *path, char *buf, size_t size)
+{
+	if (path != NULL && strcmp(path, "/proc/self/exe") == 0) {
+		char *self = own_path();
+		size_t n;
+		if (self == NULL) {
+			errno = ENOENT;
+			return -1;
+		}
+		n = strlen(self);
+		if (n > size)
+			n = size;
+		memcpy(buf, self, n); /* as readlink: no terminating NUL */
+		free(self);
+		return (ssize_t)n;
+	}
+	return readlink(path, buf, size);
+}
+
+/* Appends s to the buffer, single-quoted for sh. */
+static void append_quoted(char **buf, size_t *len, const char *s)
+{
+	size_t need = *len + 3 + 4 * strlen(s);
+	char *p;
+	*buf = realloc(*buf, need + 1);
+	if (*buf == NULL)
+		fail("out of memory", NULL);
+	p = *buf + *len;
+	*p++ = '\'';
+	for (; *s != '\0'; s++) {
+		if (*s == '\'') {
+			memcpy(p, "'\\''", 4);
+			p += 4;
+		} else {
+			*p++ = *s;
+		}
+	}
+	*p++ = '\'';
+	*p = '\0';
+	*len = (size_t)(p - *buf);
+}
+
+static int qnx_execv(const char *path, char *const argv[])
+{
+	const char *at;
+	if (path != NULL && strcmp(path, "/bin/sh") == 0 && argv[0] != NULL && argv[1] != NULL &&
+	    strcmp(argv[1], "-l") == 0 && argv[2] != NULL && strcmp(argv[2], "-c") == 0 && argv[3] != NULL &&
+	    argv[4] != NULL && (at = strstr(argv[3], "\"$@\"")) != NULL) {
+		size_t len = (size_t)(at - argv[3]);
+		char *cmd = malloc(len + 1);
+		const char *args[5];
+		if (cmd == NULL)
+			fail("out of memory", NULL);
+		memcpy(cmd, argv[3], len);
+		cmd[len] = '\0';
+		for (int i = 5; argv[i] != NULL; i++) {
+			append_quoted(&cmd, &len, argv[i]);
+			cmd[len++] = ' ';
+			cmd[len] = '\0';
+		}
+		cmd = realloc(cmd, len + strlen(at + 4) + 1);
+		if (cmd == NULL)
+			fail("out of memory", NULL);
+		strcpy(cmd + len, at + 4); /* whatever followed "$@" */
+		args[0] = argv[0];
+		args[1] = "-l";
+		args[2] = "-c";
+		args[3] = cmd;
+		args[4] = NULL;
+		return execv(path, (char *const *)args);
+	}
+	return execv(path, argv);
+}
+
+static const void *pinvoke_override(const char *library, const char *entry)
+{
+	if (library == NULL || entry == NULL || strcmp(library, "libc") != 0)
+		return NULL;
+	if (strcmp(entry, "readlink") == 0)
+		return (const void *)qnx_readlink;
+	if (strcmp(entry, "execv") == 0)
+		return (const void *)qnx_execv;
+	return NULL;
+}
+
 static void *runtime_thread(void *arg)
 {
 	void *lib;
@@ -220,6 +337,14 @@ static void *runtime_thread(void *arg)
 		set_aot_mode(MONO_AOT_MODE_INTERP);
 	else if (mode == NULL || strcmp(mode, "jit") != 0)
 		set_aot_mode(MONO_AOT_MODE_INTERP_ONLY);
+	{
+		static char override[32];
+		if (nproperties >= MAX_PROPERTIES)
+			fail("no room for the PINVOKE_OVERRIDE property (MAX_PROPERTIES)", NULL);
+		snprintf(override, sizeof override, "%lu", (unsigned long)(uintptr_t)pinvoke_override);
+		keys[nproperties] = "PINVOKE_OVERRIDE";
+		values[nproperties++] = override;
+	}
 	if (initialize(nproperties, keys, values) != 0)
 		fail("monovm_initialize failed", NULL);
 	if (execute(app_argc, app_argv, app_path, &code) != 0)
@@ -260,6 +385,31 @@ static void private_tmpdir(void)
 	setenv("TMPDIR", dir, 1);
 }
 
+/* The executable's resolved path, as the process manager reports it
+ * (QNX has no /proc/self/exe); as minipal_getexepath does in the runtime.
+ * NULL if it cannot be found. */
+static char *own_path(void)
+{
+	struct {
+		procfs_debuginfo info;
+		char path[PATH_MAX];
+	} map;
+	char path[PATH_MAX + 1];
+	int fd = open("/proc/self/as", O_RDONLY);
+
+	if (fd < 0)
+		return NULL;
+	memset(&map, 0, sizeof map);
+	if (devctl(fd, DCMD_PROC_MAPDEBUG_BASE, &map, sizeof map, NULL) != EOK || map.info.path[0] == '\0') {
+		close(fd);
+		return NULL;
+	}
+	close(fd);
+	/* Reported without the leading '/', or as given if relative ("./bin/x"). */
+	snprintf(path, sizeof path, "%s%s", map.info.path[0] == '/' || map.info.path[0] == '.' ? "" : "/", map.info.path);
+	return realpath(path, NULL);
+}
+
 int main(int argc, char **argv)
 {
 	sigset_t set;
@@ -267,11 +417,23 @@ int main(int argc, char **argv)
 	pthread_t signals, runtime;
 	int err;
 
-	if (argc < 2) {
+	char *self = own_path(), props[PATH_MAX + 16];
+	int first = 2; /* index of the program's first argument */
+
+	if (self == NULL && argv[0] != NULL && strcmp(basename(argv[0]), "qnxhost") != 0)
+		fail("cannot find this executable's path, so not its props file", argv[0]);
+	if (self != NULL && strcmp(basename(self), "qnxhost") != 0) {
+		/* Multi-call: <tree>/<name>/<name> reads <tree>/<name>.props. */
+		char *name = strdup(basename(self)), *dir = dirname(self);
+		snprintf(props, sizeof props, "%s/../%s.props", dir, name);
+		first = 1;
+	} else if (argc < 2) {
 		fprintf(stderr, "usage: %s <program.props> [arguments...]\n", argv[0]);
 		return 2;
+	} else {
+		snprintf(props, sizeof props, "%s", argv[1]);
 	}
-	read_props(argv[1]);
+	read_props(props);
 	if (getenv("QNXHOST_MALLINFO") != NULL)
 		atexit(print_mallinfo);
 	/* The runtime's AOT image loader reads its settings from these. */
@@ -280,8 +442,8 @@ int main(int argc, char **argv)
 	if (getenv("QNXHOST_VERBOSE") != NULL)
 		setenv("MONO_QNX_AOT_LOADER_VERBOSE", "1", 1);
 	private_tmpdir();
-	app_argc = argc - 2;
-	app_argv = (const char **)argv + 2;
+	app_argc = argc - first;
+	app_argv = (const char **)argv + first;
 
 	/* Block before any thread exists, so that every thread inherits the mask. */
 	async_signal_set(&set);
