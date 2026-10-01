@@ -1,0 +1,405 @@
+# QNX 6.5
+
+Mono and the native libraries run on QNX Neutrino 6.5.0 on 32-bit x86. This
+note records where QNX 6.5 differs from Linux in ways that shaped the port:
+for each, the fact, what it breaks, the solution chosen, and the
+alternatives that were rejected. The facts were measured on QNX 6.5.0 x86.
+
+The port uses the managed libraries of `linux-x86` unmodified. Everything
+QNX-specific is in Mono (`HOST_QNX`), in System.Native (`__QNXNTO__`), and in
+`qnxhost` (`src/mono/qnx/host`), the host that replaces the `dotnet` host on
+QNX. It builds with clang and lld against the QNX SDP 6.5.0 sysroot
+(`eng/native/qnx`).
+
+## The Linux personality
+
+**Fact.** .NET has no runtime identifier for QNX, and the managed libraries
+decide most platform behaviour at build time, per identifier.
+
+**Consequence.** A QNX identifier would mean building and maintaining every
+managed library for it.
+
+**Solution.** The runtime identifier is `linux-x86`, and the native layer
+presents the Linux behaviour the managed libraries expect: Linux errno
+values, the `/proc` files they read, Linux socket and signal semantics.
+`OperatingSystem.IsLinux()` is true on QNX; `RuntimeInformation.OSDescription`
+reports QNX.
+
+**Rejected.** A QNX identifier with managed changes, for the reason above.
+
+## The host
+
+**Fact.** The `dotnet` host is C++ and needs a C++ runtime that QNX 6.5 does
+not have. QNX has no `/proc/self/exe`. QNX 6.5's `/bin/sh` (ksh) drops the
+positional parameters of `-c` when `-l` is given: `sh -l -c 'echo $#' "" a b`
+prints 0, and 2 without `-l`.
+
+**Consequence.** Something else has to start the runtime. Programs that
+start themselves again by their own path (PowerShell does for jobs and
+`-Login`) need that path to be theirs, not the host's. PowerShell's login
+code reads `/proc/self/exe` with libc's `readlink`, and runs
+`/bin/sh -l -c 'exec pwsh "$@"' "" <args>`, which lost every argument.
+
+**Solution.** `qnxhost`, in C, reads a props file with the properties the
+`dotnet` host would pass (trusted assemblies, search paths, runtime
+settings), confines signals (below) and starts the runtime on a thread with
+an 8 MiB lazy stack, since the main thread's is 516 KiB. It is multi-call: a
+copy named `<program>` at `<tree>/<program>/<program>` reads
+`<tree>/<program>.props`, found from its own path as the process manager
+reports it (`DCMD_PROC_MAPDEBUG_BASE`), never from `argv[0]`, so
+`Environment.ProcessPath` and the process name are the program's. A
+P/Invoke override (the `PINVOKE_OVERRIDE` property) answers `readlink` of
+`/proc/self/exe` and rewrites that one `/bin/sh -l -c` call to carry its
+arguments in the command string; everything else resolves as usual.
+
+**Rejected.** A symbolic link to `qnxhost` as the program: the process
+manager reports the resolved path, `qnxhost` itself. Finding the props file
+from `argv[0]`: a `PATH` lookup or a login shell's `-pwsh` does not give a
+path.
+
+## Signal handlers and FPU state
+
+**Fact.** QNX 6.5 does not preserve FPU and SSE state across a signal
+handler: when a handler writes `xmm` registers, the interrupted code finds
+its own values changed. Measured on QNX 6.5.0 under QEMU: a first probe
+found the interrupted code's registers changed in 4 program runs of 10; a
+probe that holds a pattern in `xmm0`-`xmm7` while a timer signal arrives
+every 500 µs found it changed after about 9 handler runs in 10. A handler also
+starts from the interrupted code's state: its direction flag, MXCSR and x87
+control word.
+
+**Consequence.** The runtime is built with SSE2, so any C code a handler
+runs, its callees included, may use `xmm` registers, and floating-point
+results in the interrupted code would change at random.
+
+**Solution.** Every handler Mono installs is entered through
+`mono_qnx_signal_trampoline` (`mono/utils/mono-signal-qnx.c`), and
+System.Native's through `SystemNative_QnxSignalTrampoline`. Both are written
+in assembly, so that nothing runs before the state is saved. They align a
+512-byte area to 16 bytes (QNX aligns the stack to 4 only), `fxsave`, give
+the handler the state the ABI promises at a call (`cld`, `fninit`, MXCSR
+`0x1f80`), call it, and `fxrstor`. No pattern was lost in about 10,000
+handler runs behind the trampoline. The FPU state in the signal context
+(`uc_mcontext.fpu`) does not hold the interrupted state, so nothing reads it:
+`UCONTEXT_HAS_XMM` stays undefined on QNX.
+
+**Rejected.** Building only the handlers without SSE: it would not cover
+what they call. Restoring from the signal context: it does not hold the
+interrupted values.
+
+## No `SA_RESTART`, no `sigaltstack`
+
+**Fact.** QNX 6.5 has neither. A signal that arrives on a thread blocked in
+`read`, `write` or `pthread_cond_wait` makes the call fail with `EINTR`.
+
+**Consequence.** The runtime, the native libraries and managed code assume
+Linux restarts those calls; any thread could fail at random under signals.
+
+**Solution.** Confinement. `qnxhost` blocks the asynchronous signals
+(`SIGINT`, `SIGTERM`, `SIGCHLD`, `SIGWINCH`, `SIGUSR1` and the others) in the
+main thread before any other thread exists, so that every thread inherits
+the mask, and a signal thread of its own unblocks them and waits in `pause`.
+Process-directed signals are delivered only there, and the handlers the
+runtime and System.Native install run on that thread; System.Native's
+forwards the signal to its pipe, as on Linux. Synchronous signals, `SIGPIPE`
+and the real-time signals Mono sends to its own threads stay unblocked, and
+Mono already copes with `EINTR` where it interrupts its own threads.
+`SA_RESTART` is defined as 0 where the sources use it. A child process must
+not inherit the mask, so on QNX it starts with no signal blocked. Mono's
+alternate-stack handling of stack overflow (`ENABLE_SIGALTSTACK`) stays off,
+as it is by default.
+
+**Rejected.** Retrying `EINTR` at every call site: the calls are spread over
+the runtime, the native libraries and the managed code, and missing one
+would fail only under load.
+
+## No ELF TLS
+
+**Fact.** QNX 6.5's dynamic loader does not support `PT_TLS` segments.
+
+**Consequence.** `__thread` variables, which the runtime uses, cannot be
+loaded.
+
+**Solution.** Everything is compiled with `-femulated-tls`: thread-local
+variables go through `__emutls_get_address` (from the gcc 4.4 libgcc of the
+QNX SDP). The AOT image loader refuses images with a `PT_TLS` segment.
+
+## Eager commit, `MAP_LAZY` and the AOT image loader
+
+**Fact.** QNX 6.5 commits RAM for the whole of a mapping when it is made,
+unless the mapping is `MAP_LAZY`; Linux commits pages when they are first
+touched. A 256 MiB `PROT_NONE` reservation takes 256 MB. A private file
+mapping costs twice the file's size at map time. `dlopen` commits every
+page of a library at load, and `posix_madvise(POSIX_MADV_DONTNEED)` frees
+nothing. Running out of memory on a lazy page raises `SIGBUS` with
+`BUS_OBJERR` at the first touch.
+
+**Consequence.** Reservations, card tables, assemblies and AOT images would
+each cost their full size in RAM, in every process.
+
+**Solution** (`mono/utils/mono-mmap.c`, `mono/utils/mono-dl-qnx.c`):
+- anonymous memory is lazy by accounting type: every `PROT_NONE`
+  reservation, the SGen card tables and the interpreter's stacks. The
+  nursery and the major heap stay eager, so that running out of memory
+  fails at `mmap`;
+- aligned allocations reserve the slack lazily and map the aligned part over
+  it;
+- assemblies are mapped `MAP_SHARED|MAP_LAZY`: only the pages read cost
+  memory, shared between processes;
+- discarding maps fresh `MAP_FIXED|MAP_LAZY` pages over the range;
+- `SIGBUS` with `BUS_OBJERR` prints "Out of memory" and exits with status 1;
+- AOT images (`*.dll.so`) are mapped by `mono_dl_open` itself instead of
+  `dlopen`: a `PROT_NONE` reservation, the read-execute segment
+  `MAP_SHARED|MAP_LAZY`, the read-write segment `MAP_PRIVATE|MAP_LAZY`, then
+  the `R_386_RELATIVE` relocations. An image with anything else (TLS, other
+  relocations, needed libraries) falls back to `dlopen`.
+
+**Rejected.** `dlopen` for AOT images: a program pays for every image in full
+at startup, used or not. Linking the images into the executable: the
+executable's pages are committed the same way. Reading the images' working
+set ahead of a cold start: measured slower than faulting the pages in.
+
+## Page faults on a cold start
+
+**Fact.** A page fault on a file mapping fills QNX's block cache one page
+per round trip to the disk driver: on a cold cache it costs about 11 times
+as much per byte as a `read()`. `posix_fadvise` and `posix_madvise` with
+`WILLNEED` return 0 and read nothing ahead.
+
+**Consequence.** With lazily mapped assemblies and AOT images, the first
+start after a boot reads its working set fault by fault: about 2.4 s, of
+which about 0.6 s is CPU, against about 0.7 s once the files are cached.
+
+**Solution.** None in the runtime: the lazy mappings stay, because they save
+the memory of everything not used.
+
+**Rejected.** Reading the working set (58 MB) before starting: 3.6 s, or
+3.2 s in a thread beside the runtime, since the disk, not the CPU, is the
+limit. A prefetch of only the pages a start touches, or AOT images laid out
+in the order the methods run, could help; neither is done.
+
+## Ahead-of-time code on x86
+
+**Fact.** Upstream Mono lacked pieces x86 needs to run AOT code together
+with the interpreter: the unbox-arbitrary trampoline, the native-to-interp
+entry trampoline and its call-context helpers, and static rgctx trampolines
+that find the GOT without EBX, which only AOT code sets (native code calling
+an interpreted `[UnmanagedCallersOnly]` method reaches one). x86 AOT images
+are also large: about three times arm64's code for the same assemblies,
+because x86 Mono compiles `Vector<T>` and `Vector128<T>` as ordinary code and,
+without `MONO_ARCH_DYN_CALL_SUPPORTED`, emits one runtime-invoke wrapper per
+signature.
+
+**Consequence.** Mixed mode did not work on x86, and full AOT of the
+libraries a program uses costs hundreds of megabytes.
+
+**Solution.** The missing trampolines are added for x86, with fixes found
+on the way (an uncompiled method taking its neighbour's unbox trampoline;
+`get_native_call_context_ret` using the wrong `CallInfo`; decoding
+`UnmanagedCallConv` arguments without creating managed objects). The AOT
+cross compiler gets i686 Linux and QNX targets; images are built on the
+build host, never on QNX. The default configuration is normal (not full)
+AOT images of the libraries used at startup, compiled with profiles and the
+new `native-wrappers` option, which puts P/Invoke, icall and JIT icall
+wrappers into normal images too, with the JIT for the rest: 27 MiB of images,
+and 187 methods left to the JIT at startup.
+
+**Rejected.** Full AOT of the same libraries with the interpreter for the
+rest: 184 MiB of images. Interpreter only: slower, for about the same
+memory.
+
+## `poll()` and the socket event port
+
+**Fact.** QNX 6.5 gives programs neither epoll nor kqueue; libc has `poll`,
+`select` and `ionotify`.
+
+**Consequence.** .NET's `SocketAsyncEngine` needs an event port for every
+asynchronous socket and pipe, a child process's redirected output included.
+
+**Solution.** A port on `ionotify` and pulses (`pal_networking.c`). The port
+is a channel that receives pulses. Registration arms each direction with
+`_NOTIFY_ACTION_POLLARM`, the action `poll` and `select` use, and posts an
+event for a direction that is ready already, as epoll reports readiness at
+registration. Each I/O function that can leave `EAGAIN` or `EINPROGRESS` on
+a registered descriptor arms that direction again, and posts the event
+itself if the descriptor is ready or cannot be armed. A pulse carries the
+descriptor and a registration sequence number, so that pulses from an
+earlier registration of the same number are dropped; closing a descriptor
+forgets it, since .NET never unregisters before closing.
+
+**Rejected.** `_NOTIFY_ACTION_TRANARM`: it fails with `EBUSY` when another
+process is blocked in `select` on the same file, and a pending input arm
+refuses every further arm on the descriptor (for a pipe, on its other end
+too), so a child process that `select`s on a pipe it shares would break it.
+
+## The io-pkt unlink deadlock and the socket locks
+
+**Fact.** On QNX 6.5, unlinking a Unix socket's name while the network stack
+(io-pkt) serves another socket request, from any process, deadlocks io-pkt
+until a reboot.
+
+**Consequence.** .NET unlinks socket names in `Socket.Dispose` of a bound
+Unix socket, in every `NamedPipeServerStream`, and in `File.Delete` of a
+socket.
+
+**Solution** (`pal_socklock_qnx.c`). A process-wide read-write lock is taken
+shared around the socket control calls (`socket`, `bind`, `listen`,
+`connect` and `accept` on non-blocking descriptors, the option and name
+calls) and `close`, and exclusively around the unlink of a name that `lstat`
+reports as a socket. Under it, an `fcntl` record lock on
+`/tmp/qnxhost-<uid>/socket.lock` does the same between the processes of one
+user; record locks belong to the process, so the first thread to take the
+shared side takes the read lock and the last releases it. A pair of `fcntl`
+calls costs 16-20 µs. Reads, writes and the event port's arms stay unlocked:
+700,440 transfers overlapping 20,000 locked unlinks, and about 49,000 arms
+overlapping 4,000, caused no deadlock. `qnxhost` also gives programs a
+private temporary directory, where .NET creates its named pipes, so that
+programs listing `/tmp` don't touch those names.
+
+**Rejected.** The `fcntl` lock alone: it does not exclude threads of the same
+process. A lock across all users: other users' processes and programs not
+built on .NET (`sshd`) cannot be made to take it, so they are not covered.
+
+## `/proc` emulation
+
+**Fact.** QNX's `/proc` holds, per process, only an address-space file,
+`as`; the information comes from `devctl` on it. There is no
+`/proc/self/exe`, and no `/proc/net`.
+
+**Consequence.** `Process`, `Environment.ProcessPath` and
+`System.Net.NetworkInformation` read Linux's files.
+
+**Solution** (`pal_procfs_qnx.c`). `SystemNative_Open`, `Stat`, `LStat` and
+`ReadLink` recognise `/proc/<pid>/{stat,status,cmdline,maps,exe}` and
+`/proc/net/route`, and serve Linux-format text built at open from
+`DCMD_PROC_INFO`, `DCMD_PROC_MAPINFO`, `DCMD_PROC_PAGEDATA`,
+`DCMD_PROC_MAPDEBUG` and `sysctl(NET_RT_DUMP)`, through an unlinked shared
+memory object, which seeks and supports `pread` as .NET requires. There is
+no counterpart for the thread list, handle counts or peak memory, so they
+read as empty, 0 and the current values. `minipal_getexepath` uses
+`DCMD_PROC_MAPDEBUG_BASE`.
+
+**Rejected.** Changing the managed readers: see the Linux personality.
+
+## `fork` and `vfork`
+
+**Fact.** `fork` fails with `ENOSYS` in a multithreaded process. `vfork`
+works but fails spuriously with `EBADF` while other threads open and close
+descriptors (1,783 times in 2,000).
+
+**Consequence.** `Process.Start` failed in any program with more than one
+thread, which every .NET program has.
+
+**Solution.** `ForkAndExecProcess` always uses `vfork` on QNX, retried on
+`EBADF`, with every signal blocked around it; the child resets handlers and
+starts with an empty signal mask, kept in its own `sigset_t` since it shares
+the parent's memory until `execve`.
+
+## `inotify` by polling
+
+**Fact.** QNX 6.5 has no inotify.
+
+**Consequence.** `FileSystemWatcher` failed with "Not supported".
+
+**Solution** (`pal_inotify_qnx.c`). `SystemNative_INotifyInit` returns the
+read end of a pipe, fed by a thread that scans the watched directories with
+`readdir` and `lstat` and writes the differences as `inotify_event` records:
+create, delete, modify, attribute changes, moves paired by inode within one
+scan, `IN_IGNORED` and `IN_Q_OVERFLOW`. The interval is 250 ms, lengthened to
+keep near 300 `lstat` calls a second. Each record is one `write` of at most
+`PIPE_BUF` bytes, and no more than 4,096 bytes are left unread, so that a
+read never splits a record. The directories are scanned with no lock held.
+Changes within one interval merge, a rewrite that keeps both size and
+modification time (whole seconds) is not seen, and there are no access
+events. The managed watcher is unchanged.
+
+## Static constructor order (not QNX-specific)
+
+**Fact.** ECMA-335 lets a `beforefieldinit` type initializer run at any time
+before the first access to one of its static fields. Mono's JIT and AOT code
+run it when the method that accesses the field is compiled or loaded;
+CoreCLR and Mono's interpreter run it at the access.
+
+**Consequence.** Code written against CoreCLR can depend on the order. In
+PowerShell, `PSVersionInfo`'s static constructor sets `PSVersion` and then
+reads `RemotingConstants`, whose initializer reads `PSVersion`. With the JIT
+or AOT code, `RemotingConstants` was initialized first, its host version
+stayed null, and every out-of-process runspace (`Start-Job`) failed.
+
+**Solution.** In a static constructor, an access to a static field of
+another `beforefieldinit` class initializes that class at the access, as on
+CoreCLR. Other methods keep the current behaviour.
+
+## Other differences
+
+| Fact | Solution |
+|---|---|
+| No `mkstemps` | The fallback in `SystemNative_MksTemps` fills the X's before the suffix itself and opens with `O_CREAT \| O_EXCL`; before, it created the file without the suffix. Not QNX-specific: bionic lacks `mkstemps` too |
+| `strerror_r` returns `EINVAL` for an unknown error and leaves the buffer as it was | "Unknown error *n*" is written instead of returning uninitialized text. Not QNX-specific |
+| `getnameinfo` fails with `EAI_FAIL` unless `sin_len`/`sin6_len` is set | The addresses System.Native builds set it |
+| io-pkt reports `AF_UNIX` address lengths at nearly the full `sockaddr_un` size | `Accept`, `GetPeerName` and `GetSockName` trim them to Linux's lengths |
+| `int64_t` is 8-aligned inside structs (as Mono's managed `long` on QNX), `long long` 4-aligned | Structs shared with managed code use `int64_t` only |
+| `clock_getres(CLOCK_MONOTONIC)` fails with `EINVAL`, while `clock_gettime` works | Mono probes the resolution once on `CLOCK_REALTIME` and keeps `errno` |
+| `ftruncate` of a special file fails with `ENOSYS` where Linux gives `EINVAL` | Mapped to `EINVAL` for files that are not regular |
+| `printf` crashes on a `NULL` `%s` | Mono's logging guards the arguments that can be `NULL` |
+| No `O_NOFOLLOW`, `mkdtemp` or `futimes`; file times are whole seconds | Emulated (`futimes` with `futime`, to the second) |
+| No mount table API | The root is reported as the only mount point |
+| `EALREADY` equals `EBUSY` | Errno 16 maps to `EBUSY` |
+
+## Raw sockets and ping
+
+**Fact.** Raw IPv4 sockets ignore `IP_TTL` when sending and have no option
+for the don't-fragment bit, but honour an IP header supplied with
+`IP_HDRINCL`. A connected raw socket receives only its peer's packets, so it
+never sees a router's Time Exceeded, and `sendto` on a connected socket
+fails with `EISCONN`. Raw sockets need root, and there are no unprivileged
+ICMP sockets.
+
+**Solution.** For raw ICMP sockets, System.Native remembers `IP_TTL` and
+`DontFragment` per descriptor and, once either is set, sends its own IP
+header. `Connect` records the peer instead of connecting, and `Send`,
+`SendMessage` and `GetPeerName` use it, as .NET's `Ping` uses the socket on
+FreeBSD and macOS. Without root, .NET runs the `ping` utility with Linux's
+options; QNX's `ping` takes the timeout as `-w` and the TTL as `-T`, and has
+no `-M`, so `qnxhost`'s P/Invoke override rewrites that one command.
+
+**Rejected.** Emulating Linux's `IP_RECVERR` to report each router's address
+during a traceroute: hop addresses are reported as on FreeBSD and macOS.
+
+## Thread priorities
+
+**Fact.** `sched_get_priority_min..max` is 1..255 for root and 1..63 for
+other users; threads start at 10, and system services run between: io-pkt
+at 21.
+
+**Consequence.** `mono_thread_internal_set_priority` spreads .NET's five
+levels over that range, so Normal was 128 (32 for other users), above every
+service, and a busy managed thread starved the machine: with two CPU-bound
+managed threads on two processors, ssh stopped answering for the whole
+minute they ran.
+
+**Solution.** On QNX, Normal is the priority of the thread that starts the
+runtime, read once in `mono_thread_init`, and each level adds or subtracts
+one: 8 to 12 from the default 10, for root and other users alike.
+
+**Rejected.** Taking the base from the first thread whose priority is set:
+a thread created at another level would shift every later one.
+
+## Time zones
+
+**Fact.** QNX 6.5 has no time-zone database. The local zone is a POSIX rule
+string in `TZ` (`EST5EDT4,M3.2.0/2,M11.1.0/2`) or `confstr(_CS_TIMEZONE)`,
+and libc reads `TZ` again on every `mktime`. .NET reads a `TZ` that is not
+an absolute path as a file under `TZDIR`, and knows nothing of rule strings.
+
+**Consequence.** .NET's local zone was UTC.
+
+**Solution.** `qnxhost` writes the rule as a one-transition TZif file, with
+the rule in its footer, under the rule's own name in a private `TZDIR` whose
+other entries link to the real zone directory. `TZ` is unchanged, so libc
+and child processes keep its meaning; with `TZ` unset, the system's rule is
+used and put in `TZ`. Programs ship the IANA zones and point `TZDIR` at
+them.
+
+**Rejected.** Rewriting `TZ` for .NET: libc would lose the zone. A zone name
+in `TZ`: libc understands only rule strings and would use UTC.
