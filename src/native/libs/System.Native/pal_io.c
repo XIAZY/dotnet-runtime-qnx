@@ -1222,6 +1222,23 @@ int32_t SystemNative_FTruncate(intptr_t fd, int64_t length)
 #endif
             ToFileDescriptor(fd),
             (off_t)length)) < 0 && errno == EINTR);
+#if defined(__QNXNTO__)
+    // QNX reports ENOSYS for a file that cannot be truncated, such as
+    // /dev/null; Linux and POSIX report EINVAL, which FileStream takes to mean
+    // "a special file, nothing to truncate" (FileMode.Create on /dev/null).
+    if (result < 0 && errno == ENOSYS)
+    {
+        struct stat st;
+        if (fstat(ToFileDescriptor(fd), &st) == 0 && !S_ISREG(st.st_mode))
+        {
+            errno = EINVAL;
+        }
+        else
+        {
+            errno = ENOSYS;
+        }
+    }
+#endif
     return result;
 }
 
