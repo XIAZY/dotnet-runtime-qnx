@@ -7,6 +7,7 @@
 #include "pal_io.h"
 #include "pal_networking.h"
 #include "pal_procfs_qnx.h"
+#include "pal_socklock_qnx.h"
 #include "pal_utilities.h"
 #include "pal_safecrt.h"
 #include "pal_types.h"
@@ -410,7 +411,12 @@ int32_t SystemNative_Close(intptr_t fd)
     QnxSocketEventPortForget(ToFileDescriptor(fd));
     QnxRawIpForget(ToFileDescriptor(fd));
 #endif
+#if defined(__QNXNTO__)
+    // Closing a socket is a socket call for the unlink lock (pal_socklock_qnx.c).
+    int result = QNX_SOCKET_LOCKED(int, close(ToFileDescriptor(fd)));
+#else
     int result = close(ToFileDescriptor(fd));
+#endif
     if (result < 0 && errno == EINTR) result = 0; // on all supported platforms, close(2) returning EINTR still means it was released
     return result;
 }
@@ -435,7 +441,12 @@ intptr_t SystemNative_Dup(intptr_t oldfd)
 int32_t SystemNative_Unlink(const char* path)
 {
     int32_t result;
+#if defined(__QNXNTO__)
+    // Unlinking a socket's name must not overlap a socket call (pal_socklock_qnx.c).
+    while ((result = QnxUnlink(path)) < 0 && errno == EINTR);
+#else
     while ((result = unlink(path)) < 0 && errno == EINTR);
+#endif
     return result;
 }
 

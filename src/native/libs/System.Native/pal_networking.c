@@ -84,6 +84,30 @@
 #include <linux/icmp.h>
 #endif
 
+#if defined(__QNXNTO__)
+// Every socket control call in this file runs under the shared side of the
+// unlink lock (pal_socklock_qnx.c): unlinking a Unix socket's name while
+// io-pkt serves another socket request deadlocks io-pkt until a reboot. accept
+// and connect take it only on a non-blocking descriptor, so that it is never
+// held across a wait. Reads, writes, sends and receives stay unlocked.
+#include <sys/socket.h>
+#include <fcntl.h>
+#include <sys/iomgr.h>
+#include <sys/neutrino.h>
+#include "pal_socklock_qnx.h"
+#define socket(...) QNX_SOCKET_LOCKED(int, socket(__VA_ARGS__))
+#define socketpair(...) QNX_SOCKET_LOCKED(int, socketpair(__VA_ARGS__))
+#define bind(...) QNX_SOCKET_LOCKED(int, bind(__VA_ARGS__))
+#define listen(...) QNX_SOCKET_LOCKED(int, listen(__VA_ARGS__))
+#define shutdown(...) QNX_SOCKET_LOCKED(int, shutdown(__VA_ARGS__))
+#define setsockopt(...) QNX_SOCKET_LOCKED(int, setsockopt(__VA_ARGS__))
+#define getsockopt(...) QNX_SOCKET_LOCKED(int, getsockopt(__VA_ARGS__))
+#define getsockname(...) QNX_SOCKET_LOCKED(int, getsockname(__VA_ARGS__))
+#define getpeername(...) QNX_SOCKET_LOCKED(int, getpeername(__VA_ARGS__))
+#define accept(fd, ...) QNX_SOCKET_LOCKED_IF_NONBLOCKING(int, fd, accept(fd, __VA_ARGS__))
+#define connect(fd, ...) QNX_SOCKET_LOCKED_IF_NONBLOCKING(int, fd, connect(fd, __VA_ARGS__))
+#endif
+
 
 #if HAVE_KQUEUE
 #if KEVENT_HAS_VOID_UDATA
