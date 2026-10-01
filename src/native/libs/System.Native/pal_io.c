@@ -9,6 +9,8 @@
 #include "pal_safecrt.h"
 #include "pal_types.h"
 
+#include <minipal/random.h>
+
 #include <assert.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -920,7 +922,7 @@ int32_t SystemNative_MkFifo(const char* pathName, uint32_t mode)
 #endif /* TARGET_WASI */
 }
 
-#if defined(TARGET_WASI)
+#if defined(TARGET_WASI) || (!HAVE_MKSTEMPS && HAVE_MKSTEMP)
 // wasi-libc provides neither mkstemp(s) nor mkdtemp, so emulate them the way libc does:
 // replace the trailing XXXXXX with random characters and try to create the entry exclusively,
 // retrying on name collisions.
@@ -957,10 +959,16 @@ static int32_t FillTempNameRandomChars(char* randomChars)
 {
     static const char s_chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
     uint8_t randomBytes[TEMP_NAME_RANDOM_CHARS];
+#if defined(TARGET_WASI)
     if (getentropy(randomBytes, sizeof(randomBytes)) != 0)
     {
         return -1;
     }
+#else
+    // Where mkstemps is missing (bionic/Android, QNX) there may be no getentropy
+    // either; the name need not be secret, since O_EXCL makes its creation safe.
+    minipal_get_non_cryptographically_secure_random_bytes(randomBytes, (int32_t)sizeof(randomBytes));
+#endif
 
     for (int32_t i = 0; i < TEMP_NAME_RANDOM_CHARS; i++)
     {
@@ -969,7 +977,7 @@ static int32_t FillTempNameRandomChars(char* randomChars)
 
     return 0;
 }
-#endif /* TARGET_WASI */
+#endif /* TARGET_WASI || (!HAVE_MKSTEMPS && HAVE_MKSTEMP) */
 
 char* SystemNative_MkdTemp(char* pathTemplate)
 {
@@ -1014,41 +1022,13 @@ intptr_t SystemNative_MksTemps(char* pathTemplate, int32_t suffixLength)
     intptr_t result;
 #if HAVE_MKSTEMPS
     while ((result = mkstemps(pathTemplate, suffixLength)) < 0 && errno == EINTR);
-#elif HAVE_MKSTEMP
-    // mkstemps is not available bionic/Android, but mkstemp is
-    // mkstemp doesn't allow the suffix that msktemps does allow, so we'll need to
-    // remove that before passisng pathTemplate to mkstemp
-
-    int32_t pathTemplateLength = (int32_t)strlen(pathTemplate);
-
-    // pathTemplate must include at least XXXXXX (6 characters) which are not part of
-    // the suffix
-    if (suffixLength < 0 || suffixLength > pathTemplateLength - 6)
-    {
-        errno = EINVAL;
-        return -1;
-    }
-
-    // Make mkstemp ignore the suffix by setting the first char of the suffix to \0,
-    // if there is a suffix
-    int32_t firstSuffixIndex = 0;
-    char firstSuffixChar = 0;
-
-    if (suffixLength > 0)
-    {
-        firstSuffixIndex = pathTemplateLength - suffixLength;
-        firstSuffixChar = pathTemplate[firstSuffixIndex];
-        pathTemplate[firstSuffixIndex] = 0;
-    }
-
-    while ((result = mkstemp(pathTemplate)) < 0 && errno == EINTR);
-
-    // Reset the first char of the suffix back to its original value, if there is a suffix
-    if (suffixLength > 0)
-    {
-        pathTemplate[firstSuffixIndex] = firstSuffixChar;
-    }
-#elif defined(TARGET_WASI)
+#elif HAVE_MKSTEMP || defined(TARGET_WASI)
+    // mkstemps is not available everywhere (bionic/Android, QNX), and mkstemp
+    // cannot keep a suffix: a name made by mkstemp from the template cut at the
+    // suffix is not the name the caller gets back. So the file is made here as
+    // mkstemps would make it, as on WASI: the six X's before the suffix replaced
+    // with random characters, opened with O_CREAT | O_EXCL, and tried again with
+    // other characters if that name exists.
     char* randomChars = GetTempNameRandomChars(pathTemplate, suffixLength);
     if (randomChars == NULL)
     {
