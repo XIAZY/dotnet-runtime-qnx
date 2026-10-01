@@ -1673,6 +1673,35 @@ int32_t SystemNative_Send(intptr_t socket, void* buffer, int32_t bufferLen, int3
     return SystemNative_ConvertErrorPlatformToPal(errno);
 }
 
+#if defined(__QNXNTO__)
+// Whether addr is the address the socket is connected to (family, address
+// and port).
+static bool IsConnectedPeer(int fd, const struct sockaddr* addr, socklen_t addrLen)
+{
+    struct sockaddr_storage peer;
+    socklen_t peerLen = sizeof(peer);
+
+    if (addr == NULL || getpeername(fd, (struct sockaddr*)&peer, &peerLen) != 0 || peer.ss_family != addr->sa_family)
+    {
+        return false;
+    }
+    if (addr->sa_family == AF_INET && addrLen >= (socklen_t)sizeof(struct sockaddr_in))
+    {
+        const struct sockaddr_in* a = (const struct sockaddr_in*)addr;
+        const struct sockaddr_in* b = (const struct sockaddr_in*)&peer;
+        return a->sin_port == b->sin_port && a->sin_addr.s_addr == b->sin_addr.s_addr;
+    }
+    if (addr->sa_family == AF_INET6 && addrLen >= (socklen_t)sizeof(struct sockaddr_in6))
+    {
+        const struct sockaddr_in6* a = (const struct sockaddr_in6*)addr;
+        const struct sockaddr_in6* b = (const struct sockaddr_in6*)&peer;
+        return a->sin6_port == b->sin6_port && a->sin6_scope_id == b->sin6_scope_id &&
+               memcmp(&a->sin6_addr, &b->sin6_addr, sizeof(a->sin6_addr)) == 0;
+    }
+    return false;
+}
+#endif
+
 int32_t SystemNative_SendMessage(intptr_t socket, MessageHeader* messageHeader, int32_t flags, int64_t* sent)
 {
     if (messageHeader == NULL || sent == NULL || messageHeader->SocketAddressLen < 0 ||
@@ -1702,6 +1731,21 @@ int32_t SystemNative_SendMessage(intptr_t socket, MessageHeader* messageHeader, 
     while ((res = sendmsg(fd, &header, socketFlags)) < 0 && (errno == EINTR || (errno == EPROTOTYPE && --maxProtoRetry > 0)));
 #else
     while ((res = sendmsg(fd, &header, socketFlags)) < 0 && errno == EINTR);
+#endif
+#if defined(__QNXNTO__)
+    // Linux lets a connected socket name its own peer in sendto(); QNX's stack
+    // (from the BSDs) returns EISCONN for any address (measured on QNX 6.5:
+    // sendto() of the connected address on a connected raw ICMP socket).
+    // .NET's Ping, built for Linux, connects its raw ICMP socket and then sends
+    // to the same address. Sent again without the address only when it is the
+    // peer's; any other address keeps the error.
+    if (res < 0 && errno == EISCONN && header.msg_name != NULL &&
+        IsConnectedPeer(fd, (const struct sockaddr*)header.msg_name, (socklen_t)header.msg_namelen))
+    {
+        header.msg_name = NULL;
+        header.msg_namelen = 0;
+        while ((res = sendmsg(fd, &header, socketFlags)) < 0 && errno == EINTR);
+    }
 #endif
 #else // CMSG_SPACE
     // we will only use 0th buffer
@@ -2534,6 +2578,20 @@ SystemNative_SetSockOpt(intptr_t socket, int32_t socketOptionLevel, int32_t sock
                 *optionValue = *optionValue != 0 ? IP_PMTUDISC_DO : IP_PMTUDISC_DONT;
             }
         }
+    }
+#endif
+
+#if defined(__QNXNTO__) && !defined(IP_MTU_DISCOVER) && !defined(IP_DONTFRAG)
+    // QNX 6.5 has no option for the DF bit, and leaves it clear on raw and UDP
+    // sockets (measured on QNX 6.5: a 3,000-byte ICMP echo and UDP datagram go
+    // out fragmented through a 1,500-byte interface), so "don't set DF" is what
+    // it does already; DF itself stays unsupported. .NET's Ping sets
+    // DontFragment = false on every request.
+    if (socketOptionLevel == SocketOptionLevel_SOL_IP && socketOptionName == SocketOptionName_SO_IP_DONTFRAGMENT &&
+        optionLen >= 1)
+    {
+        int value = optionLen >= (int32_t)sizeof(int) ? *(int*)optionValue : *optionValue;
+        return value == 0 ? Error_SUCCESS : Error_ENOTSUP;
     }
 #endif
 
