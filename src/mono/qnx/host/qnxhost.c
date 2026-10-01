@@ -41,9 +41,11 @@
  *  - Runs the runtime on a thread with an 8 MiB stack: the main thread's
  *    is 512 KiB on QNX, and the interpreter needs more. The stack is lazy,
  *    so only the pages used take memory.
- *  - Gives the program a private temporary directory, /tmp/qnxhost-<uid>
- *    (mode 0700, made if missing), as TMPDIR, unless TMPDIR is set already
- *    (by the environment or the props file) or QNXHOST_PRIVATE_TMPDIR=0.
+ *  - Makes a private directory, /tmp/qnxhost-<uid> (mode 0700), in every
+ *    configuration: System.Native keeps its cross-process socket lock file
+ *    there. It gives the program that directory as TMPDIR, unless
+ *    TMPDIR is set already (by the environment or the props file) or
+ *    QNXHOST_PRIVATE_TMPDIR=0.
  *    .NET makes the Unix sockets of named pipes in the temporary directory
  *    and deletes them when they close, and on QNX 6.5 unlinking a socket's
  *    name while io-pkt serves another request from any process deadlocks
@@ -52,7 +54,8 @@
  *    stats /tmp. Side effect: the program's other temporary files, and the
  *    TMPDIR its child processes inherit, are in that directory too. A
  *    directory of that name that is not this user's, is a link, or is open
- *    to others is not used (a warning, and TMPDIR stays unset).
+ *    to others is not used (a warning; TMPDIR stays unset, and the socket
+ *    lock works within each process only).
  */
 #include <dlfcn.h>
 #include <errno.h>
@@ -241,17 +244,19 @@ static void private_tmpdir(void)
 	char dir[64];
 	struct stat st;
 
-	if (getenv("TMPDIR") != NULL || (opt != NULL && strcmp(opt, "0") == 0))
-		return;
+	/* Made in every configuration: System.Native keeps its cross-process
+	 * socket lock file there (pal_socklock_qnx.c). */
 	snprintf(dir, sizeof dir, "/tmp/qnxhost-%u", (unsigned)getuid());
 	if (mkdir(dir, 0700) != 0 && errno != EEXIST) {
-		fprintf(stderr, "qnxhost: warning: cannot make %s: %s; TMPDIR left unset\n", dir, strerror(errno));
+		fprintf(stderr, "qnxhost: warning: cannot make %s: %s\n", dir, strerror(errno));
 		return;
 	}
 	if (lstat(dir, &st) != 0 || !S_ISDIR(st.st_mode) || st.st_uid != getuid() || (st.st_mode & 077) != 0) {
-		fprintf(stderr, "qnxhost: warning: %s is not a private directory of this user; TMPDIR left unset\n", dir);
+		fprintf(stderr, "qnxhost: warning: %s is not a private directory of this user\n", dir);
 		return;
 	}
+	if (getenv("TMPDIR") != NULL || (opt != NULL && strcmp(opt, "0") == 0))
+		return;
 	setenv("TMPDIR", dir, 1);
 }
 
