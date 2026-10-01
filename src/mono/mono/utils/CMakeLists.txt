@@ -48,6 +48,8 @@ set(utils_common_sources
     mono-dl-windows.c
     mono-dl-darwin.c
     mono-dl-posix.c
+    mono-dl-qnx.c
+    mono-dl-qnx.h
     mono-dl-wasm.c
     mono-dl.h
     mono-dl-windows-internals.h
