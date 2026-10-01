@@ -67,7 +67,23 @@
  *    directory of that name that is not this user's, is a link, or is open
  *    to others is not used (a warning; TMPDIR stays unset, and the socket
  *    lock works within each process only).
+ *  - Makes a POSIX rule string in TZ (EST5EDT4,M3.2.0/2,M11.1.0/2, the
+ *    usual form on QNX, which has no time-zone database) a zone .NET can
+ *    find. .NET reads a TZ that is not an absolute path as a file under
+ *    TZDIR and knows nothing of rule strings (on Linux too: it falls back
+ *    to UTC); QNX's libc knows only rule strings and parses TZ again on
+ *    every mktime, so TZ itself must not change. The rule is written as a
+ *    one-transition TZif file (the rule in its footer) at the relative path
+ *    the rule spells out, in /tmp/qnxhost-<uid>/zoneinfo-<hash>, a directory
+ *    that otherwise holds symlinks to every entry of the real TZDIR (the
+ *    tree's etc/zoneinfo, or the user's); TZDIR then names that directory.
+ *    .NET's local zone is then the rule, its id the rule string, while libc
+ *    and child programs keep the TZ the user set. With TZ unset, the
+ *    system's rule (confstr(_CS_TIMEZONE)) is used and put in TZ, with the
+ *    same meaning for libc. Nothing is done for a zone name, an absolute
+ *    path or an empty TZ.
  */
+#include <dirent.h>
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -362,11 +378,14 @@ static void print_mallinfo(void)
 		m.arena, m.uordblks + m.usmblks, m.fordblks + m.fsmblks, m.usmblks, m.fsmblks);
 }
 
+/* /tmp/qnxhost-<uid> once private_tmpdir has made or checked it, else NULL. */
+static const char *private_dir;
+
 /* Sets TMPDIR to /tmp/qnxhost-<uid>; see the comment at the top. */
 static void private_tmpdir(void)
 {
 	const char *opt = getenv("QNXHOST_PRIVATE_TMPDIR");
-	char dir[64];
+	static char dir[64];
 	struct stat st;
 
 	/* Made in every configuration: System.Native keeps its cross-process
@@ -380,9 +399,222 @@ static void private_tmpdir(void)
 		fprintf(stderr, "qnxhost: warning: %s is not a private directory of this user\n", dir);
 		return;
 	}
+	private_dir = dir;
 	if (getenv("TMPDIR") != NULL || (opt != NULL && strcmp(opt, "0") == 0))
 		return;
 	setenv("TMPDIR", dir, 1);
+}
+
+/* Time zones; see the comment at the top. */
+
+static uint64_t fnv1a(const char *s)
+{
+	uint64_t h = 14695981039346656037ULL;
+	for (; *s != '\0'; s++)
+		h = (h ^ (unsigned char)*s) * 1099511628211ULL;
+	return h;
+}
+
+/* Reads the standard-time part of a POSIX TZ rule, a name ("EST", or
+ * "<+0530>" quoted) and its offset ("5", "-5:30", hours west of UTC).
+ * Returns 0 if the string does not start like a rule. */
+static int rule_std(const char *rule, char *name, size_t size, int32_t *utoff)
+{
+	const char *p = rule, *start;
+	long h, m = 0, sec = 0;
+	int west = 1;
+	size_t n;
+
+	if (*p == '<') {
+		start = ++p;
+		while (*p != '\0' && *p != '>')
+			p++;
+		if (*p != '>')
+			return 0;
+		n = (size_t)(p++ - start);
+	} else {
+		start = p;
+		while ((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z'))
+			p++;
+		n = (size_t)(p - start);
+	}
+	if (n < 3 || n >= size)
+		return 0;
+	memcpy(name, start, n);
+	name[n] = '\0';
+	if (*p == '+' || *p == '-')
+		west = *p++ == '+';
+	if (*p < '0' || *p > '9')
+		return 0;
+	h = strtol(p, (char **)&p, 10);
+	if (*p == ':') {
+		m = strtol(p + 1, (char **)&p, 10);
+		if (*p == ':')
+			sec = strtol(p + 1, (char **)&p, 10);
+	}
+	if (h > 167 || m > 59 || sec > 59)
+		return 0;
+	*utoff = (int32_t)((h * 3600 + m * 60 + sec) * (west ? -1 : 1));
+	return 1;
+}
+
+static void put32(unsigned char **p, uint32_t v)
+{
+	for (int i = 3; i >= 0; i--)
+		*(*p)++ = (unsigned char)(v >> (8 * i));
+}
+
+/* A TZif version 2 file for the rule: one type (standard time), one
+ * transition, in 1901, and the rule in the footer. .NET applies the footer
+ * only after the last transition, so a file without one would be ignored.
+ * Returns its length, 0 if it does not fit. */
+static size_t make_tzif(const char *rule, const char *name, int32_t utoff, unsigned char *buf, size_t size)
+{
+	size_t chars = strlen(name) + 1;
+	unsigned char *p = buf;
+
+	if (2 * (44 + 6 + chars) + 9 + strlen(rule) + 2 > size)
+		return 0;
+	for (int v = 1; v <= 2; v++) {
+		memcpy(p, "TZif2", 5);
+		memset(p + 5, 0, 15);
+		p += 20;
+		put32(&p, 0); /* isutcnt */
+		put32(&p, 0); /* isstdcnt */
+		put32(&p, 0); /* leapcnt */
+		put32(&p, v == 2); /* timecnt */
+		put32(&p, 1); /* typecnt */
+		put32(&p, (uint32_t)chars);
+		if (v == 2) {
+			put32(&p, 0xffffffffu); /* -2^31 as a 64-bit time */
+			put32(&p, 0x80000000u);
+			*p++ = 0; /* its type */
+		}
+		put32(&p, (uint32_t)utoff);
+		*p++ = 0; /* isdst */
+		*p++ = 0; /* desigidx */
+		memcpy(p, name, chars);
+		p += chars;
+	}
+	p += sprintf((char *)p, "\n%s\n", rule);
+	return (size_t)(p - buf);
+}
+
+/* Writes data to path unless the file already holds exactly that: through
+ * a temporary file and rename, so that a reader never sees part of it. */
+static int write_file(const char *path, const unsigned char *data, size_t n)
+{
+	unsigned char old[1024];
+	char tmp[PATH_MAX];
+	int fd = open(path, O_RDONLY);
+
+	if (fd >= 0) {
+		ssize_t got = read(fd, old, sizeof old);
+		close(fd);
+		if (got == (ssize_t)n && memcmp(old, data, n) == 0)
+			return 0;
+	}
+	if (snprintf(tmp, sizeof tmp, "%s.%d", path, (int)getpid()) >= (int)sizeof tmp)
+		return -1;
+	fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+	if (fd < 0)
+		return -1;
+	if (write(fd, data, n) != (ssize_t)n || close(fd) != 0 || rename(tmp, path) != 0) {
+		unlink(tmp);
+		return -1;
+	}
+	return 0;
+}
+
+/* Makes dir/<every directory component of rel>, refusing symlinks, so that
+ * nothing is written into the real zone directory through one. */
+static int make_parents(const char *dir, const char *rel)
+{
+	char path[PATH_MAX];
+	const char *slash;
+	struct stat st;
+
+	for (slash = strchr(rel, '/'); slash != NULL; slash = strchr(slash + 1, '/')) {
+		if (snprintf(path, sizeof path, "%s/%.*s", dir, (int)(slash - rel), rel) >= (int)sizeof path)
+			return -1;
+		if (mkdir(path, 0700) != 0 && errno != EEXIST)
+			return -1;
+		if (lstat(path, &st) != 0 || !S_ISDIR(st.st_mode))
+			return -1;
+	}
+	return 0;
+}
+
+static void rule_zone(void)
+{
+	const char *tz = getenv("TZ"), *tzdir = getenv("TZDIR"), *c;
+	char rule[256], name[64], path[PATH_MAX], zdir[PATH_MAX] = "", *src = NULL;
+	unsigned char data[1024];
+	int32_t utoff;
+	size_t n, len;
+	DIR *d;
+	struct dirent *e;
+
+	if (tz != NULL) {
+		if (snprintf(rule, sizeof rule, "%s", tz) >= (int)sizeof rule)
+			return;
+	} else if ((n = confstr(_CS_TIMEZONE, rule, sizeof rule)) == 0 || n > sizeof rule) {
+		return;
+	}
+	if (rule[0] == '\0' || rule[0] == ':' || rule[0] == '/' || !rule_std(rule, name, sizeof name, &utoff))
+		return;
+	/* Each component must be a plain file name. */
+	for (c = rule; c != NULL; c = strchr(c, '/') != NULL ? strchr(c, '/') + 1 : NULL)
+		if (*c == '/' || *c == '\0' || strncmp(c, "./", 2) == 0 || strncmp(c, "../", 3) == 0 ||
+		    strcmp(c, ".") == 0 || strcmp(c, "..") == 0)
+			return;
+	if (tzdir == NULL || tzdir[0] == '\0')
+		tzdir = "/usr/share/zoneinfo"; /* .NET's default */
+	snprintf(path, sizeof path, "%s/%s", tzdir, rule);
+	if (access(path, R_OK) == 0)
+		goto done; /* a zone of that name exists ("EST5EDT"), or ours from a parent process */
+	if (private_dir == NULL)
+		return;
+	src = realpath(tzdir, NULL);
+	len = strlen(private_dir);
+	if (src != NULL && strncmp(src, private_dir, len) == 0 && strncmp(src + len, "/zoneinfo-", 10) == 0) {
+		snprintf(zdir, sizeof zdir, "%s", src); /* a parent's: already linked */
+	} else {
+		snprintf(zdir, sizeof zdir, "%s/zoneinfo-%016llx", private_dir,
+			 (unsigned long long)fnv1a(src != NULL ? src : ""));
+		if (mkdir(zdir, 0700) != 0 && errno != EEXIST)
+			goto fail;
+		if (src != NULL && (d = opendir(src)) != NULL) {
+			char target[PATH_MAX];
+			struct stat st;
+
+			while ((e = readdir(d)) != NULL) {
+				if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0)
+					continue;
+				snprintf(path, sizeof path, "%s/%s", zdir, e->d_name);
+				snprintf(target, sizeof target, "%s/%s", src, e->d_name);
+				if (lstat(path, &st) != 0 && symlink(target, path) != 0 && errno != EEXIST) {
+					closedir(d);
+					goto fail;
+				}
+			}
+			closedir(d);
+		}
+	}
+	free(src);
+	src = NULL;
+	n = make_tzif(rule, name, utoff, data, sizeof data);
+	snprintf(path, sizeof path, "%s/%s", zdir, rule);
+	if (n == 0 || make_parents(zdir, rule) != 0 || write_file(path, data, n) != 0)
+		goto fail;
+	setenv("TZDIR", zdir, 1);
+done:
+	if (tz == NULL)
+		setenv("TZ", rule, 1); /* libc's meaning already: it reads the same rule */
+	return;
+fail:
+	fprintf(stderr, "qnxhost: warning: cannot make a zone for TZ rule %s in %s: %s\n", rule, zdir, strerror(errno));
+	free(src);
 }
 
 /* The executable's resolved path, as the process manager reports it
@@ -442,6 +674,7 @@ int main(int argc, char **argv)
 	if (getenv("QNXHOST_VERBOSE") != NULL)
 		setenv("MONO_QNX_AOT_LOADER_VERBOSE", "1", 1);
 	private_tmpdir();
+	rule_zone();
 	app_argc = argc - first;
 	app_argv = (const char **)argv + first;
 
