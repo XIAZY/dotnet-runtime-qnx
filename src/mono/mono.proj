@@ -895,6 +895,9 @@
       <_MonoRuntimeArtifacts Include="$(MonoObjDir)out\lib\PDB\$(MonoSharedLibName).pdb" Condition="Exists('$(MonoObjDir)out\lib\PDB\$(MonoSharedLibName).pdb')">
         <Destination>$(RuntimeBinDir)$(MonoSharedLibName).pdb</Destination>
       </_MonoRuntimeArtifacts>
+      <_MonoRuntimeArtifacts Include="$(MonoObjDir)out\bin\qnxhost" Condition="'$(TargetsQNX)' == 'true' and Exists('$(MonoObjDir)out\bin\qnxhost')">
+        <Destination>$(RuntimeBinDir)qnxhost</Destination>
+      </_MonoRuntimeArtifacts>
       <_MonoRuntimeArtifacts Include="$(_MonoRuntimeStaticFilePath)" Condition="Exists($(_MonoRuntimeStaticFilePath)) and '$(_MonoRuntimeStaticFilePath)' != '$(_MonoRuntimeFilePath)'">
         <Destination>$(RuntimeBinDir)$(MonoStaticLibFileName)</Destination>
       </_MonoRuntimeArtifacts>
