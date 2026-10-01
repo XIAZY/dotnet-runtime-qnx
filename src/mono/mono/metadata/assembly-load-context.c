@@ -629,7 +629,7 @@ mono_alc_add_assembly (MonoAssemblyLoadContext *alc, MonoAssembly *ass)
 	mono_assembly_addref (ass);
 	// Prepending here will break the test suite with frequent InvalidCastExceptions, so we have to append
 	alc->loaded_assemblies = g_slist_append (alc->loaded_assemblies, ass);
-	mono_trace (G_LOG_LEVEL_DEBUG, MONO_TRACE_ASSEMBLY, "Assembly %s[%p] added to ALC '%s'[%p], ref_count=%d", ass->aname.name, ass, alc->name, (gpointer)alc, ass->ref_count);
+	mono_trace (G_LOG_LEVEL_DEBUG, MONO_TRACE_ASSEMBLY, "Assembly %s[%p] added to ALC '%s'[%p], ref_count=%d", ass->aname.name, ass, alc->name ? alc->name : "<default>", (gpointer)alc, ass->ref_count);
 	mono_alc_assemblies_unlock (alc);
 
 	alcs_lock ();

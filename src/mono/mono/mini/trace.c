@@ -196,7 +196,7 @@ mono_trace_enter_method (MonoMethod *method, MonoJitInfo *ji, MonoProfilerCallCo
 				} else if (klass == mono_defaults.runtimetype_class) {
 					printf ("[this:[TYPE:%p:%s]]", o, mono_type_full_name (((MonoReflectionType*)o)->type));
 				} else {
-					printf ("this:%p[%s.%s %s]", o, m_class_get_name_space (klass), m_class_get_name (klass), o->vtable->domain->friendly_name);
+					printf ("this:%p[%s.%s %s]", o, m_class_get_name_space (klass), m_class_get_name (klass), o->vtable->domain->friendly_name ? o->vtable->domain->friendly_name : "");
 				}
 			} else {
 				printf ("this:NULL");

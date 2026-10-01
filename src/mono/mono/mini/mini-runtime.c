@@ -264,7 +264,7 @@ mono_get_method_from_ip_u (void *ip)
 
 	const char *in_interp = ji->is_interp ? " interp" : "";
 
-	res = g_strdup_printf (" %s [{%p} + 0x%x%s] %s (%p %p) [%p - %s]", method_name, method, (int)((char*)ip - (char*)ji->code_start), in_interp, file_loc ? file_loc : "", ji->code_start, (char*)ji->code_start + ji->code_size, domain, domain->friendly_name);
+	res = g_strdup_printf (" %s [{%p} + 0x%x%s] %s (%p %p) [%p - %s]", method_name, method, (int)((char*)ip - (char*)ji->code_start), in_interp, file_loc ? file_loc : "", ji->code_start, (char*)ji->code_start + ji->code_size, domain, domain->friendly_name ? domain->friendly_name : "");
 
 	mono_debug_free_source_location (location);
 	g_free (method_name);
@@ -363,7 +363,7 @@ mono_print_method_from_ip (void *ip)
 			shared_type = "gshared ";
 	}
 
-	g_print ("IP %p at offset 0x%x of %smethod %s (%p %p)[domain %p - %s]\n", ip, (int)((char*)ip - (char*)ji->code_start), shared_type, method, ji->code_start, (char*)ji->code_start + ji->code_size, target_domain, target_domain->friendly_name);
+	g_print ("IP %p at offset 0x%x of %smethod %s (%p %p)[domain %p - %s]\n", ip, (int)((char*)ip - (char*)ji->code_start), shared_type, method, ji->code_start, (char*)ji->code_start + ji->code_size, target_domain, target_domain->friendly_name ? target_domain->friendly_name : "");
 
 	if (source)
 		g_print ("%s:%d\n", source->source_file, source->row);
