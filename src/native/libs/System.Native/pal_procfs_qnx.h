@@ -8,7 +8,8 @@
 #include <stdint.h>
 #include <sys/stat.h>
 
-// Linux-format /proc/<pid>/{stat,status,cmdline,maps,exe} for QNX; see pal_procfs_qnx.c.
+// Linux-format /proc/<pid>/{stat,status,cmdline,maps,exe} and /proc/net/route
+// for QNX; see pal_procfs_qnx.c.
 
 // Returns 0 if path is not an emulated file. Otherwise returns 1 and sets *fd
 // to a descriptor holding the file's text, or to -1 with errno set.
