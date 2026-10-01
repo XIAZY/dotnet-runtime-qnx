@@ -227,7 +227,8 @@ static void *signal_thread(void *arg)
 /*
  * P/Invoke override (Mono's PINVOKE_OVERRIDE host property): two entry
  * points of "libc" that PowerShell imports directly, bypassing System.Native,
- * get QNX versions; every other pair resolves as usual (NULL).
+ * and System.Native's process start get QNX versions; every other pair
+ * resolves as usual (NULL).
  *
  * readlink: PowerShell's login code (AttemptExecPwshLogin) reads
  * /proc/self/exe, which QNX does not have; that path is answered from the
@@ -238,6 +239,14 @@ static void *signal_thread(void *arg)
  * (measured: `sh -l -c 'echo $#' "" a b` prints 0; without -l, 2), so pwsh
  * restarted with no arguments. That one call is rewritten to put the quoted
  * arguments in the command string itself; any other execv goes to libc.
+ *
+ * SystemNative_ForkAndExecProcess: without root, .NET's Ping (Test-Connection)
+ * runs the ping utility with Linux's options, "-c 1 -W <seconds> [-t <ttl>]
+ * [-M do|dont] -s <size> <address>". QNX's ping (NetBSD's) rejects -W
+ * ("illegal option"), takes the TTL as -T (its -t is the TOS), the timeout as
+ * -w, and has no -M. So a start of a program named ping whose arguments
+ * include -W, a command that cannot work on QNX as written, gets -w, -T and
+ * no -M; any other start goes to System.Native unchanged.
  */
 static char *own_path(void);
 
@@ -315,8 +324,90 @@ static int qnx_execv(const char *path, char *const argv[])
 	return execv(path, argv);
 }
 
+typedef int32_t (*fork_and_exec_fn)(const char *, char *const[], char *const[], const char *, int32_t, int32_t,
+				    int32_t, int32_t, uint32_t, uint32_t, uint32_t *, int32_t, int32_t *, int32_t *, int32_t *,
+				    int32_t *);
+
+/* System.Native's own SystemNative_ForkAndExecProcess, from the first
+ * NATIVE_DLL_SEARCH_DIRECTORIES entry that has the library, as the runtime
+ * itself finds it (dlopen of the same file returns the same handle). */
+static fork_and_exec_fn real_fork_and_exec(void)
+{
+	static fork_and_exec_fn fn;
+	const char *dirs = NULL;
+
+	if (fn != NULL)
+		return fn;
+	for (int i = 0; i < nproperties; i++)
+		if (strcmp(keys[i], "NATIVE_DLL_SEARCH_DIRECTORIES") == 0)
+			dirs = values[i];
+	while (dirs != NULL && *dirs != '\0' && fn == NULL) {
+		const char *end = strchr(dirs, ':');
+		size_t n = end != NULL ? (size_t)(end - dirs) : strlen(dirs);
+		char path[PATH_MAX];
+		void *lib;
+
+		snprintf(path, sizeof path, "%.*s%slibSystem.Native.so", (int)n, dirs,
+			 n > 0 && dirs[n - 1] == '/' ? "" : "/");
+		if ((lib = dlopen(path, RTLD_NOW)) != NULL)
+			fn = (fork_and_exec_fn)dlsym(lib, "SystemNative_ForkAndExecProcess");
+		dirs = end != NULL ? end + 1 : NULL;
+	}
+	if (fn == NULL)
+		fail("cannot find SystemNative_ForkAndExecProcess in NATIVE_DLL_SEARCH_DIRECTORIES", NULL);
+	return fn;
+}
+
+static int32_t qnx_fork_and_exec(const char *filename, char *const argv[], char *const envp[], const char *cwd,
+				 int32_t redirectStdin, int32_t redirectStdout, int32_t redirectStderr,
+				 int32_t setCredentials, uint32_t userId, uint32_t groupId, uint32_t *groups,
+				 int32_t groupsLength, int32_t *childPid, int32_t *stdinFd, int32_t *stdoutFd,
+				 int32_t *stderrFd)
+{
+	const char *base = filename != NULL ? strrchr(filename, '/') : NULL;
+	int has_W = 0, n = 0;
+
+	base = base != NULL ? base + 1 : filename;
+	if (base != NULL && strcmp(base, "ping") == 0 && argv != NULL)
+		for (n = 0; argv[n] != NULL; n++)
+			if (n > 0 && strcmp(argv[n], "-W") == 0)
+				has_W = 1;
+	if (has_W) {
+		const char **args = calloc((size_t)n + 1, sizeof *args);
+		int32_t r;
+		int j = 0;
+
+		if (args == NULL)
+			return -1;
+		for (int i = 0; i < n; i++) {
+			if (i > 0 && strcmp(argv[i], "-M") == 0 && argv[i + 1] != NULL &&
+			    (strcmp(argv[i + 1], "do") == 0 || strcmp(argv[i + 1], "dont") == 0)) {
+				i++;
+				continue;
+			}
+			if (i > 0 && strcmp(argv[i], "-W") == 0)
+				args[j++] = "-w";
+			else if (i > 0 && strcmp(argv[i], "-t") == 0)
+				args[j++] = "-T";
+			else
+				args[j++] = argv[i];
+		}
+		r = real_fork_and_exec()(filename, (char *const *)args, envp, cwd, redirectStdin, redirectStdout, redirectStderr,
+					 setCredentials, userId, groupId, groups, groupsLength, childPid, stdinFd,
+					 stdoutFd, stderrFd);
+		free((void *)args);
+		return r;
+	}
+	return real_fork_and_exec()(filename, argv, envp, cwd, redirectStdin, redirectStdout, redirectStderr,
+				    setCredentials, userId, groupId, groups, groupsLength, childPid, stdinFd, stdoutFd,
+				    stderrFd);
+}
+
 static const void *pinvoke_override(const char *library, const char *entry)
 {
+	if (library != NULL && entry != NULL && strcmp(library, "libSystem.Native") == 0 &&
+	    strcmp(entry, "SystemNative_ForkAndExecProcess") == 0)
+		return (const void *)qnx_fork_and_exec;
 	if (library == NULL || entry == NULL || strcmp(library, "libc") != 0)
 		return NULL;
 	if (strcmp(entry, "readlink") == 0)
