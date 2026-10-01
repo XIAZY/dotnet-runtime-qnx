@@ -927,5 +927,9 @@ add_subdirectory("${CLR_SRC_NATIVE_DIR}/public" public_apis)
 
 add_subdirectory(mono)
 
+if(HOST_QNX AND NOT DISABLE_EXECUTABLES)
+  add_subdirectory(qnx/host)
+endif()
+
 configure_file(cmake/config.h.in config.h)
 configure_file(cmake/eglib-config.h.cmake.in mono/eglib/eglib-config.h)
