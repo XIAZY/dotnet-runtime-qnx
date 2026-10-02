@@ -307,6 +307,38 @@ thread, which every .NET program has.
 starts with an empty signal mask, kept in its own `sigset_t` since it shares
 the parent's memory until `execve`.
 
+## The SMP kernel freeze under process creation and disk flushes
+
+**Fact.** On a KVM-based cloud VM with 2 vCPUs, QNX 6.5's SMP kernel
+(`procnto-smp-instr`) froze the whole machine, until a power cycle, under
+process creation beside periodic disk flushes. No .NET code is needed: four
+parallel ssh login loops (each login a `fork` in sshd), beside a file write
+and `sync` every 2 s, froze it in both runs, after about 2.5 and 4.5 minutes
+(the cleanly measured one with both vCPUs at 100% and no disk or network I/O
+in the host's metrics). The same load ran 8 minutes twice on the
+uniprocessor kernel (`procnto-instr`) booted from the same disk, and on SMP
+it also ran 8 minutes with the writes but without the `sync`.
+
+**Consequence.** A program that starts processes often while the disk is
+being flushed can stop such a machine; PowerShell starting `ssh` children in
+a loop beside small writes did within minutes. Ordinary interactive use does
+not come near it, and on the uniprocessor kernel, PowerShell's full upstream
+test suite (over 12,000 tests, two runs of about 37 minutes) ran without a
+stop.
+
+**Solution.** None in the runtime. The workaround is the uniprocessor
+kernel: QNX 6.5's stock install ships `qnxbasedma.ifs` (`procnto-instr`, disk
+DMA on) beside the SMP image, selectable at the boot loader's menu; setting
+the VM to one vCPU works as well.
+
+**Rejected.** Changing how the runtime creates processes: the machine froze
+with no .NET process running at all. Starting processes with QNX's `spawn()`
+instead of `vfork` was also tried, and the machine also stopped.
+
+**Not known.** Whether other hypervisors, other virtual disk controllers
+(this one is an emulated PIIX3 IDE in multiword DMA mode 2) or real SMP
+hardware show it, and which kernel path spins.
+
 ## `inotify` by polling
 
 **Fact.** QNX 6.5 has no inotify.
