@@ -337,11 +337,15 @@ instead of `vfork` was also tried, and the machine also stopped.
 
 **Not known.** Which kernel path spins, and where else it shows. It did not
 appear in two runs (8 and 30 minutes) of the same load under QEMU's full
-emulation (TCG, 2 CPUs, the same kernel, an emulated IDE disk), about three
-times as many logins as the KVM VM needed to freeze, by an estimate from
-login rates. So whether it shows depends on the virtual machine; the QNX
-kernel may still hold the underlying bug. Real SMP hardware and other
-hypervisors have not been tested.
+emulation (TCG, 2 CPUs, the same kernel with a patched local-APIC startup
+that QEMU requires, an emulated IDE disk), about three times as many logins
+as the KVM VM needed to freeze, by an estimate from login rates. So whether
+it shows depends on the virtual machine or on that boot-time APIC setup,
+which differed too; the QNX kernel may still hold the underlying bug. The
+APIC startup, which the QEMU runs used, does not boot on the KVM VM: it
+cannot find the IOAPIC pin of the timer, so the two startups cannot be
+compared there. Real SMP hardware and other hypervisors have not been
+tested.
 
 ## `inotify` by polling
 
