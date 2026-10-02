@@ -335,9 +335,13 @@ the VM to one vCPU works as well.
 with no .NET process running at all. Starting processes with QNX's `spawn()`
 instead of `vfork` was also tried, and the machine also stopped.
 
-**Not known.** Whether other hypervisors, other virtual disk controllers
-(this one is an emulated PIIX3 IDE in multiword DMA mode 2) or real SMP
-hardware show it, and which kernel path spins.
+**Not known.** Which kernel path spins, and where else it shows. It did not
+appear in two runs (8 and 30 minutes) of the same load under QEMU's full
+emulation (TCG, 2 CPUs, the same kernel, an emulated IDE disk), about three
+times as many logins as the KVM VM needed to freeze, by an estimate from
+login rates. So whether it shows depends on the virtual machine; the QNX
+kernel may still hold the underlying bug. Real SMP hardware and other
+hypervisors have not been tested.
 
 ## `inotify` by polling
 
