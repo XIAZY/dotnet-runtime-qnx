@@ -28,6 +28,8 @@
 #include <mach/machine.h>
 #include <sys/sysctl.h>
 #include <sys/types.h>
+#elif defined(HOST_QNX)
+#include <sys/syspage.h>
 #else
 #if defined (HAVE_SYS_UTSNAME_H)
 #include <sys/utsname.h>
@@ -94,6 +96,30 @@ mono_hwcap_arch_init (void)
 	}
 
 	/* TODO: Find a way to detect features like Thumb and VFP. */
+#elif defined(HOST_QNX)
+	/*
+	 * QNX has neither the auxiliary vector nor /proc/cpuinfo; the system page
+	 * describes the CPU (<arm/syspage.h>). Every ARMv7 CPU also has Thumb-2.
+	 */
+	_Uint32t flags = SYSPAGE_ENTRY (cpuinfo)->flags;
+
+	mono_hwcap_arm_is_v5 = TRUE;
+	mono_hwcap_arm_has_thumb = TRUE;
+
+	if (flags & (ARM_CPU_FLAG_V6 | ARM_CPU_FLAG_V7))
+		mono_hwcap_arm_is_v6 = TRUE;
+
+	if (flags & ARM_CPU_FLAG_V7) {
+		mono_hwcap_arm_is_v7 = TRUE;
+		mono_hwcap_arm_has_thumb2 = TRUE;
+	}
+
+	if (flags & CPU_FLAG_FPU) {
+		mono_hwcap_arm_has_vfp = TRUE;
+		/* ARMv7-A's VFP is VFPv3. */
+		if (flags & ARM_CPU_FLAG_V7)
+			mono_hwcap_arm_has_vfp3 = TRUE;
+	}
 #elif defined (_WIN32)
 	/* From MSDN:
 	 * Windows on ARM presumes that it is running on an ARMv7 architecture at all times.
