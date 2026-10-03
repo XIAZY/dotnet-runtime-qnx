@@ -497,12 +497,12 @@ static X509* ReadNextPublicCert(DIR* dir, X509Stack* tmpStack, char* pathTmp, si
 
     while ((next = readdir(dir)) != NULL)
     {
-#ifdef __QNXNTO__
-        // QNX declares d_name as char[1] with the name running past it, so
-        // sizeof would cut every name to one character; it is NUL-terminated.
-        size_t len = strlen(next->d_name);
-#else
+#if HAVE_DIRENT_NAME_SIZED
         size_t len = strnlen(next->d_name, sizeof(next->d_name));
+#else
+        // d_name is declared smaller than the names (char[1] on QNX), so
+        // sizeof would cut them short; the name is NUL-terminated.
+        size_t len = strlen(next->d_name);
 #endif
 
         if (len > 4 && 0 == strncasecmp(".pfx", next->d_name + len - 4, 4))
