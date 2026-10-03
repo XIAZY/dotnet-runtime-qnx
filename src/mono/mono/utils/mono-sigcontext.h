@@ -398,6 +398,31 @@
 	#define UCONTEXT_REG_R11(ctx) (((arm_ucontext*)(ctx))->sig_ctx.arm_fp)
 	#define UCONTEXT_REG_R12(ctx) (((arm_ucontext*)(ctx))->sig_ctx.arm_ip)
 	#define UCONTEXT_REG_CPSR(ctx) (((arm_ucontext*)(ctx))->sig_ctx.arm_cpsr)
+#elif defined(__QNXNTO__)
+	/*
+	 * <arm/context.h>: ARM_CPU_REGISTERS. QNX does not keep the interrupted
+	 * VFP state in uc_mcontext.fpu (mono-signal-qnx.c's trampoline keeps it),
+	 * so UCONTEXT_REG_VFPREGS is left undefined.
+	 */
+	typedef ucontext_t arm_ucontext;
+
+	#define UCONTEXT_REG_PC(ctx) (((ucontext_t*)(ctx))->uc_mcontext.cpu.gpr[ARM_REG_PC])
+	#define UCONTEXT_REG_SP(ctx) (((ucontext_t*)(ctx))->uc_mcontext.cpu.gpr[ARM_REG_SP])
+	#define UCONTEXT_REG_LR(ctx) (((ucontext_t*)(ctx))->uc_mcontext.cpu.gpr[ARM_REG_LR])
+	#define UCONTEXT_REG_R0(ctx) (((ucontext_t*)(ctx))->uc_mcontext.cpu.gpr[ARM_REG_R0])
+	#define UCONTEXT_REG_R1(ctx) (((ucontext_t*)(ctx))->uc_mcontext.cpu.gpr[ARM_REG_R1])
+	#define UCONTEXT_REG_R2(ctx) (((ucontext_t*)(ctx))->uc_mcontext.cpu.gpr[ARM_REG_R2])
+	#define UCONTEXT_REG_R3(ctx) (((ucontext_t*)(ctx))->uc_mcontext.cpu.gpr[ARM_REG_R3])
+	#define UCONTEXT_REG_R4(ctx) (((ucontext_t*)(ctx))->uc_mcontext.cpu.gpr[ARM_REG_R4])
+	#define UCONTEXT_REG_R5(ctx) (((ucontext_t*)(ctx))->uc_mcontext.cpu.gpr[ARM_REG_R5])
+	#define UCONTEXT_REG_R6(ctx) (((ucontext_t*)(ctx))->uc_mcontext.cpu.gpr[ARM_REG_R6])
+	#define UCONTEXT_REG_R7(ctx) (((ucontext_t*)(ctx))->uc_mcontext.cpu.gpr[ARM_REG_R7])
+	#define UCONTEXT_REG_R8(ctx) (((ucontext_t*)(ctx))->uc_mcontext.cpu.gpr[ARM_REG_R8])
+	#define UCONTEXT_REG_R9(ctx) (((ucontext_t*)(ctx))->uc_mcontext.cpu.gpr[ARM_REG_R9])
+	#define UCONTEXT_REG_R10(ctx) (((ucontext_t*)(ctx))->uc_mcontext.cpu.gpr[ARM_REG_R10])
+	#define UCONTEXT_REG_R11(ctx) (((ucontext_t*)(ctx))->uc_mcontext.cpu.gpr[ARM_REG_R11])
+	#define UCONTEXT_REG_R12(ctx) (((ucontext_t*)(ctx))->uc_mcontext.cpu.gpr[ARM_REG_R12])
+	#define UCONTEXT_REG_CPSR(ctx) (((ucontext_t*)(ctx))->uc_mcontext.cpu.spsr)
 #elif defined(__NetBSD__)
 	typedef ucontext_t arm_ucontext;
 
