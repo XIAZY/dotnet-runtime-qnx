@@ -11,7 +11,7 @@
 #include "pal_utilities.h"
 #include "pal_safecrt.h"
 #include "pal_types.h"
-#if defined(__QNXNTO__)
+#if defined(__QNXNTO__) && !HAVE_INOTIFY
 #include "pal_inotify_qnx.h"
 #endif
 
@@ -1629,7 +1629,17 @@ int32_t SystemNative_CopyFile(intptr_t sourceFd, intptr_t destinationFd, int64_t
 intptr_t SystemNative_INotifyInit(void)
 {
 #if HAVE_INOTIFY
+#if HAVE_INOTIFY_INIT1
     return inotify_init1(IN_CLOEXEC);
+#else
+    // BlackBerry 10 has inotify_init but not inotify_init1.
+    int fd = inotify_init();
+    if (fd != -1)
+    {
+        fcntl(fd, F_SETFD, FD_CLOEXEC);
+    }
+    return fd;
+#endif
 #elif defined(__QNXNTO__)
     return QnxINotifyInit();
 #else

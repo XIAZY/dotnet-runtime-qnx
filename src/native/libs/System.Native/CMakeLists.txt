@@ -96,8 +96,11 @@ if (CLR_CMAKE_TARGET_QNX)
     list (APPEND NATIVE_SOURCES pal_procfs_qnx.c)
     # The lock that keeps unlinks of socket names apart from socket calls.
     list (APPEND NATIVE_SOURCES pal_socklock_qnx.c)
-    # inotify, which QNX lacks, by polling: FileSystemWatcher, Get-Content -Wait.
-    list (APPEND NATIVE_SOURCES pal_inotify_qnx.c)
+    if (NOT HAVE_INOTIFY)
+        # inotify, where QNX lacks it (6.5), by polling: FileSystemWatcher,
+        # Get-Content -Wait.
+        list (APPEND NATIVE_SOURCES pal_inotify_qnx.c)
+    endif ()
 endif ()
 
 if (CLR_CMAKE_TARGET_ANDROID AND NOT HAVE_GETIFADDRS)

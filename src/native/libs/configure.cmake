@@ -1025,6 +1025,11 @@ check_symbol_exists(
     inotify_rm_watch
     sys/inotify.h
     HAVE_INOTIFY_RM_WATCH)
+
+check_symbol_exists(
+    inotify_init1
+    sys/inotify.h
+    HAVE_INOTIFY_INIT1)
 set (CMAKE_REQUIRED_LIBRARIES ${PREVIOUS_CMAKE_REQUIRED_LIBRARIES})
 
 set (HAVE_INOTIFY 0)
