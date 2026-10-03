@@ -83,9 +83,11 @@
  *    tree's etc/zoneinfo, or the user's); TZDIR then names that directory.
  *    .NET's local zone is then the rule, its id the rule string, while libc
  *    and child programs keep the TZ the user set. With TZ unset, the
- *    system's rule (confstr(_CS_TIMEZONE)) is used and put in TZ, with the
- *    same meaning for libc. Nothing is done for a zone name, an absolute
- *    path or an empty TZ.
+ *    system's zone (confstr(_CS_TIMEZONE)) is used and put in TZ, with the
+ *    same meaning for libc: a rule on QNX 6.5, an IANA zone name on
+ *    BlackBerry 10, whose libc reads both; a name is put in TZ only if .NET
+ *    finds it under TZDIR (libc already reads the same name). Nothing else
+ *    is done for a zone name, nor for an absolute path or an empty TZ.
  */
 #include <dirent.h>
 #include <dlfcn.h>
@@ -672,7 +674,7 @@ static void rule_zone(void)
 	} else if ((n = confstr(_CS_TIMEZONE, rule, sizeof rule)) == 0 || n > sizeof rule) {
 		return;
 	}
-	if (rule[0] == '\0' || rule[0] == ':' || rule[0] == '/' || !rule_std(rule, name, sizeof name, &utoff))
+	if (rule[0] == '\0' || rule[0] == ':' || rule[0] == '/')
 		return;
 	/* Each component must be a plain file name. */
 	for (c = rule; c != NULL; c = strchr(c, '/') != NULL ? strchr(c, '/') + 1 : NULL)
@@ -683,7 +685,9 @@ static void rule_zone(void)
 		tzdir = "/usr/share/zoneinfo"; /* .NET's default */
 	snprintf(path, sizeof path, "%s/%s", tzdir, rule);
 	if (access(path, R_OK) == 0)
-		goto done; /* a zone of that name exists ("EST5EDT"), or ours from a parent process */
+		goto done; /* a zone of that name exists ("EST5EDT", "America/New_York"), or ours from a parent process */
+	if (!rule_std(rule, name, sizeof name, &utoff))
+		return; /* a zone name .NET cannot find, or not a rule */
 	if (private_dir == NULL)
 		return;
 	src = realpath(tzdir, NULL);
