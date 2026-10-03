@@ -425,6 +425,28 @@ mono_file_map_error (size_t length, int flags, int fd, guint64 offset, void **re
 	BEGIN_CRITICAL_SECTION;
 	ptr = mmap (0, length, prot, mflags, fd, offset);
 	END_CRITICAL_SECTION;
+#ifdef HOST_QNX
+	/*
+	 * BlackBerry 10's QNX maps a file written into the inode of a deleted
+	 * file that was mapped or executed with the deleted file's cached
+	 * pages, while read() returns the new contents (measured: an assembly
+	 * replaced in place maps as the old one). msync(MS_INVALIDATE) on the
+	 * new mapping makes it, and every later mapping of the file, see the
+	 * file's contents. Invalidating costs a re-read of the file's pages, so
+	 * it is done only when the mapping's first page differs from what
+	 * read() returns: the files mapped here begin with content-specific
+	 * headers (an assembly's PE header carries a hash of its content), so a
+	 * stale mapping of a different file differs there, and an identical
+	 * first page means the same file.
+	 */
+	if (ptr != MAP_FAILED) {
+		char head [4096];
+		size_t n = length < sizeof (head) ? length : sizeof (head);
+		ssize_t got = pread (fd, head, n, offset);
+		if (got <= 0 || memcmp (ptr, head, got) != 0)
+			msync (ptr, length, MS_INVALIDATE);
+	}
+#endif
 	if (ptr == MAP_FAILED) {
 		if (error_message) {
 			*error_message = g_strdup_printf ("%s failed file:%s length:0x%" G_GSIZE_FORMAT "X offset:0x%" PRIu64 "X error:%s(0x%X)\n",
