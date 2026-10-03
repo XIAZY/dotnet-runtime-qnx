@@ -564,6 +564,10 @@ in about 4.4 s on the phone instead of 15.6 s.
   BlackBerry 10, and programs from outside the system cannot run as root
   (root's loader refuses them). The raw-socket ICMP emulation of QNX 6.5
   (see "Raw sockets and ping") is therefore never used there.
+- A process that is killed, or exits, while it binds a Unix socket name can
+  stop the network stack until a reboot (reported by others on BlackBerry 10;
+  not reproduced here). The runtime binds no socket name unasked: the
+  diagnostics server's default listen port is off on QNX.
 - The system's ICU (49) is older than .NET's minimum, so globalization is
   invariant, as on QNX 6.5.
 
