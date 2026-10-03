@@ -485,6 +485,23 @@ elseif(TARGET_ARCH MATCHES "arm")
   set(HAVE_ARMV5 1)
   set(HAVE_ARMV6 1)
   #set(HAVE_ARMV7 1) # TODO: figure out if we should set this
+  if(TARGET_QNX)
+    # QNX's ARM runtime is built for ARMv7 (eng/native/qnx/toolchain.cmake):
+    # what the compiler targets, or for the AOT cross compiler what its
+    # triple names, so that runtime, JIT and AOT code agree.
+    if(AOT_TARGET_TRIPLE)
+      if(AOT_TARGET_TRIPLE MATCHES "^armv7")
+        set(HAVE_ARMV7 1)
+      endif()
+    else()
+      include(CheckCSourceCompiles)
+      check_c_source_compiles("
+#if !defined(__ARM_ARCH) || __ARM_ARCH < 7
+#error not ARMv7
+#endif
+int main(void) { return 0; }" HAVE_ARMV7)
+    endif()
+  endif()
 elseif(TARGET_ARCH STREQUAL "riscv64")
   set(TARGET_RISCV 1)
   set(TARGET_RISCV64 1)
