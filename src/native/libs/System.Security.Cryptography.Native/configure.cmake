@@ -48,6 +48,12 @@ check_symbol_exists(
     HAVE_TIMEGM)
 cmake_pop_check_state()
 
+# QNX declares dirent's d_name as char[1], the name running past it.
+check_source_compiles(C "
+#include <dirent.h>
+int main(void) { struct dirent d; char sized[sizeof(d.d_name) > 1 ? 1 : -1]; (void)d; (void)sized; return 0; }"
+    HAVE_DIRENT_NAME_SIZED)
+
 configure_file(
     ${CMAKE_CURRENT_SOURCE_DIR}/pal_crypto_config.h.in
     ${CMAKE_CURRENT_BINARY_DIR}/pal_crypto_config.h)
