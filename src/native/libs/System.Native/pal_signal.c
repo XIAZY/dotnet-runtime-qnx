@@ -424,14 +424,16 @@ static void CloseSignalHandlingPipe(void)
     g_signalPipe[1] = -1;
 }
 
-#if defined(__QNXNTO__) && defined(__i386__)
-// QNX 6.5 does not reliably preserve the interrupted code's FPU/SSE
-// registers around a signal handler (measured on QNX 6.5.0 x86: when a
-// handler writes xmm registers, the interrupted code finds its values
-// changed after about 9 handler runs in 10). This library is built with SSE2, so its handler is entered through
-// a trampoline, in assembly so that no compiler-generated code runs first,
-// that saves the state with fxsave and restores it with fxrstor. The fxsave
-// area is 512 bytes and 16-byte aligned; QNX aligns the stack to 4 bytes.
+#if defined(__QNXNTO__) && (defined(__i386__) || defined(__arm__))
+#define QNX_SIGNAL_TRAMPOLINE 1
+// QNX does not reliably preserve the interrupted code's floating-point
+// registers around a signal handler: when a handler writes them, the
+// interrupted code finds its values changed, after about 9 handler runs in 10
+// on QNX 6.5.0 x86 (xmm registers) and nearly every run on BlackBerry 10's
+// ARM QNX (VFP registers). This library's handler is therefore entered
+// through a trampoline, in assembly so that no compiler-generated code runs
+// first, that saves the state, calls the handler from the ABI's state, and
+// restores the state.
 __attribute__((visibility("hidden"))) void SystemNative_QnxSignalEntry(int sig, siginfo_t* siginfo, void* context);
 __attribute__((visibility("hidden"))) void SystemNative_QnxSignalTrampoline(int sig, siginfo_t* siginfo, void* context);
 
@@ -440,6 +442,9 @@ void SystemNative_QnxSignalEntry(int sig, siginfo_t* siginfo, void* context)
     SignalHandler(sig, siginfo, context);
 }
 
+#if defined(__i386__)
+// x86: fxsave/fxrstor. The fxsave area is 512 bytes and 16-byte aligned; QNX
+// aligns the stack to 4 bytes.
 __asm__(
     ".text\n"
     ".p2align 4\n"
@@ -471,6 +476,41 @@ __asm__(
     "    ret\n"
     ".size SystemNative_QnxSignalTrampoline, .-SystemNative_QnxSignalTrampoline\n"
 );
+#else
+// ARM, in ARM mode whatever this file is compiled in, since QNX may enter the
+// handler with a plain branch: d0-d31 and FPSCR on an 8-byte aligned stack
+// (every BlackBerry 10 device has 32 double registers), and the handler
+// starts with the default FPSCR, 0. sig, siginfo and context stay in r0-r2.
+__asm__(
+    ".text\n"
+    ".p2align 2\n"
+    ".arm\n"
+    ".globl SystemNative_QnxSignalTrampoline\n"
+    ".hidden SystemNative_QnxSignalTrampoline\n"
+    ".type SystemNative_QnxSignalTrampoline, %function\n"
+    "SystemNative_QnxSignalTrampoline:\n"
+    "    push {r4, r5, r6, lr}\n"
+    "    mov r6, sp\n"
+    "    sub sp, sp, #264\n"
+    "    bic sp, sp, #7\n"
+    "    vstmia sp, {d0-d15}\n"
+    "    add r4, sp, #128\n"
+    "    vstmia r4, {d16-d31}\n"
+    "    vmrs r5, fpscr\n"
+    "    str r5, [sp, #256]\n"
+    "    mov r5, #0\n"
+    "    vmsr fpscr, r5\n"
+    "    blx SystemNative_QnxSignalEntry\n"
+    "    ldr r5, [sp, #256]\n"
+    "    vmsr fpscr, r5\n"
+    "    vldmia sp, {d0-d15}\n"
+    "    add r4, sp, #128\n"
+    "    vldmia r4, {d16-d31}\n"
+    "    mov sp, r6\n"
+    "    pop {r4, r5, r6, pc}\n"
+    ".size SystemNative_QnxSignalTrampoline, .-SystemNative_QnxSignalTrampoline\n"
+);
+#endif
 #endif
 
 static bool InstallSignalHandler(int sig, int flags)
@@ -515,7 +555,7 @@ static bool InstallSignalHandler(int sig, int flags)
     }
     newAction.sa_flags |= flags | SA_SIGINFO;
 #pragma clang diagnostic pop
-#if defined(__QNXNTO__) && defined(__i386__)
+#ifdef QNX_SIGNAL_TRAMPOLINE
     newAction.sa_sigaction = &SystemNative_QnxSignalTrampoline;
 #else
     newAction.sa_sigaction = &SignalHandler;
