@@ -21,7 +21,9 @@
 #include <ctype.h>
 #include <string.h>
 #include <glib.h>
+#ifdef HAVE_SYSLOG_H
 #include <syslog.h>
+#endif
 #include <stdarg.h>
 #include <errno.h>
 #include <time.h>
@@ -30,6 +32,7 @@
 
 static void *logUserData = NULL;
 
+#ifdef HAVE_SYSLOG_H
 /**
  * mapSyslogLevel:
  *
@@ -53,6 +56,7 @@ mapSyslogLevel(GLogLevelFlags level)
 		return (LOG_DEBUG);
 	return (LOG_INFO);
 }
+#endif
 
 /**
  * mono_log_open_syslog:
@@ -64,7 +68,7 @@ mapSyslogLevel(GLogLevelFlags level)
 void
 mono_log_open_syslog(const char *ident, void *userData)
 {
-#ifdef HAVE_OPENLOG
+#if defined(HAVE_SYSLOG_H) && defined(HAVE_OPENLOG)
 	openlog("mono", LOG_PID, LOG_USER);
 #endif
 	logUserData = userData;
@@ -81,7 +85,12 @@ mono_log_open_syslog(const char *ident, void *userData)
 void
 mono_log_write_syslog(const char *domain, GLogLevelFlags level, mono_bool hdr, const char *message)
 {
+#ifdef HAVE_SYSLOG_H
 	syslog (mapSyslogLevel(level), "%s", message);
+#else
+	/* No <syslog.h>: the messages go where they go with no log destination. */
+	mono_log_write_logfile (domain, level, hdr, message);
+#endif
 
 	if (level & G_LOG_LEVEL_ERROR)
 		g_assert_abort ();
@@ -94,7 +103,7 @@ mono_log_write_syslog(const char *domain, GLogLevelFlags level, mono_bool hdr, c
 void
 mono_log_close_syslog(void)
 {
-#ifdef HAVE_CLOSELOG
+#if defined(HAVE_SYSLOG_H) && defined(HAVE_CLOSELOG)
 	closelog();
 #endif
 }
