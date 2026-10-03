@@ -84,46 +84,43 @@ __asm__ (
 #else
 /*
  * ARM mode, whichever mode the runtime is compiled in, since QNX may enter
- * the handler with a plain branch. d0-d31 and FPSCR are saved on the stack,
- * 8-byte aligned; every BlackBerry 10 device has 32 double registers (VFPv3
- * D32, which the runtime is built for). The default FPSCR is 0: round to
- * nearest, no exception traps, no flush to zero, no default NaN. signo, info
- * and context stay in r0-r2 for the handler.
+ * the handler with a plain branch: a naked function, so that the compiler and
+ * the linker know it is ARM code (in top-level assembly in a Thumb file, the
+ * assembler marks the symbol as Thumb). d0-d31 and FPSCR are saved on the
+ * stack, 8-byte aligned; every BlackBerry 10 device has 32 double registers
+ * (VFPv3 D32, which the runtime is built for). The default FPSCR is 0: round
+ * to nearest, no exception traps, no flush to zero, no default NaN. signo,
+ * info and context stay in r0-r2 for the handler.
  */
-__asm__ (
-	".text\n"
-	".p2align 2\n"
-	".arm\n"
-	".globl mono_qnx_signal_trampoline\n"
-	".hidden mono_qnx_signal_trampoline\n"
-	".type mono_qnx_signal_trampoline, %function\n"
-	"mono_qnx_signal_trampoline:\n"
-	"	push {r4, r5, r6, lr}\n"
-	"	mov r6, sp\n"
-	"	sub sp, sp, #264\n"		/* d0-d31, FPSCR, and room to align */
-	"	bic sp, sp, #7\n"
-	"	vstmia sp, {d0-d15}\n"
-	"	add r4, sp, #128\n"
-	"	vstmia r4, {d16-d31}\n"
-	"	vmrs r5, fpscr\n"
-	"	str r5, [sp, #256]\n"
-	"	mov r5, #0\n"
-	"	vmsr fpscr, r5\n"
-	"	ldr r4, 2f\n"
-	"1:	add r4, pc, r4\n"		/* mono_qnx_signal_handlers, a hidden symbol */
-	"	ldr r3, [r4, r0, lsl #2]\n"
-	"	cmp r3, #0\n"
-	"	blxne r3\n"
-	"	ldr r5, [sp, #256]\n"
-	"	vmsr fpscr, r5\n"
-	"	vldmia sp, {d0-d15}\n"
-	"	add r4, sp, #128\n"
-	"	vldmia r4, {d16-d31}\n"
-	"	mov sp, r6\n"
-	"	pop {r4, r5, r6, pc}\n"
-	"2:	.word mono_qnx_signal_handlers - (1b + 8)\n"
-	".size mono_qnx_signal_trampoline, .-mono_qnx_signal_trampoline\n"
-);
+__attribute__((naked, target("arm"))) void
+mono_qnx_signal_trampoline (int signo, siginfo_t *info, void *context)
+{
+	__asm__ volatile (
+		"push {r4, r5, r6, lr}\n"
+		"mov r6, sp\n"
+		"sub sp, sp, #264\n"		/* d0-d31, FPSCR, and room to align */
+		"bic sp, sp, #7\n"
+		"vstmia sp, {d0-d15}\n"
+		"add r4, sp, #128\n"
+		"vstmia r4, {d16-d31}\n"
+		"vmrs r5, fpscr\n"
+		"str r5, [sp, #256]\n"
+		"mov r5, #0\n"
+		"vmsr fpscr, r5\n"
+		"ldr r4, 2f\n"
+		"1: add r4, pc, r4\n"		/* mono_qnx_signal_handlers, a hidden symbol */
+		"ldr r3, [r4, r0, lsl #2]\n"
+		"cmp r3, #0\n"
+		"blxne r3\n"
+		"ldr r5, [sp, #256]\n"
+		"vmsr fpscr, r5\n"
+		"vldmia sp, {d0-d15}\n"
+		"add r4, sp, #128\n"
+		"vldmia r4, {d16-d31}\n"
+		"mov sp, r6\n"
+		"pop {r4, r5, r6, pc}\n"
+		"2: .word mono_qnx_signal_handlers - (1b + 8)\n");
+}
 #endif
 
 /* Mono's SIGBUS handler, called by qnx_sigbus_handler. */

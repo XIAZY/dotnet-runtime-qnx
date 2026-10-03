@@ -481,35 +481,32 @@ __asm__(
 // handler with a plain branch: d0-d31 and FPSCR on an 8-byte aligned stack
 // (every BlackBerry 10 device has 32 double registers), and the handler
 // starts with the default FPSCR, 0. sig, siginfo and context stay in r0-r2.
-__asm__(
-    ".text\n"
-    ".p2align 2\n"
-    ".arm\n"
-    ".globl SystemNative_QnxSignalTrampoline\n"
-    ".hidden SystemNative_QnxSignalTrampoline\n"
-    ".type SystemNative_QnxSignalTrampoline, %function\n"
-    "SystemNative_QnxSignalTrampoline:\n"
-    "    push {r4, r5, r6, lr}\n"
-    "    mov r6, sp\n"
-    "    sub sp, sp, #264\n"
-    "    bic sp, sp, #7\n"
-    "    vstmia sp, {d0-d15}\n"
-    "    add r4, sp, #128\n"
-    "    vstmia r4, {d16-d31}\n"
-    "    vmrs r5, fpscr\n"
-    "    str r5, [sp, #256]\n"
-    "    mov r5, #0\n"
-    "    vmsr fpscr, r5\n"
-    "    blx SystemNative_QnxSignalEntry\n"
-    "    ldr r5, [sp, #256]\n"
-    "    vmsr fpscr, r5\n"
-    "    vldmia sp, {d0-d15}\n"
-    "    add r4, sp, #128\n"
-    "    vldmia r4, {d16-d31}\n"
-    "    mov sp, r6\n"
-    "    pop {r4, r5, r6, pc}\n"
-    ".size SystemNative_QnxSignalTrampoline, .-SystemNative_QnxSignalTrampoline\n"
-);
+// A naked function rather than top-level assembly, so that the compiler knows
+// it is ARM code: in a Thumb file, the assembler otherwise marks the symbol as
+// Thumb, and the kernel would enter ARM code in Thumb state.
+__attribute__((naked, target("arm"))) void SystemNative_QnxSignalTrampoline(int sig, siginfo_t* siginfo, void* context)
+{
+    __asm__ volatile(
+        "push {r4, r5, r6, lr}\n"
+        "mov r6, sp\n"
+        "sub sp, sp, #264\n"
+        "bic sp, sp, #7\n"
+        "vstmia sp, {d0-d15}\n"
+        "add r4, sp, #128\n"
+        "vstmia r4, {d16-d31}\n"
+        "vmrs r5, fpscr\n"
+        "str r5, [sp, #256]\n"
+        "mov r5, #0\n"
+        "vmsr fpscr, r5\n"
+        "blx SystemNative_QnxSignalEntry\n"
+        "ldr r5, [sp, #256]\n"
+        "vmsr fpscr, r5\n"
+        "vldmia sp, {d0-d15}\n"
+        "add r4, sp, #128\n"
+        "vldmia r4, {d16-d31}\n"
+        "mov sp, r6\n"
+        "pop {r4, r5, r6, pc}\n");
+}
 #endif
 #endif
 
