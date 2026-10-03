@@ -11,6 +11,10 @@
  * where written), both over one PROT_NONE reservation of the image's span so
  * that nothing else can be mapped between them.
  *
+ * Code mapped from a filesystem mounted without execute permission (the FAT
+ * SD card on BlackBerry 10) faults when it runs, while dlopen copies it into
+ * memory there, so an image on such a filesystem is left to dlopen.
+ *
  * It handles exactly what the AOT compiler emits for QNX, and refuses
  * anything else, in which case mono_dl_open () falls back to dlopen: a 32-bit
  * x86 ET_DYN with two LOAD segments (R+X, then R+W), only R_386_RELATIVE
@@ -37,6 +41,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/statvfs.h>
 #include <unistd.h>
 
 #include <glib.h>
@@ -121,6 +126,7 @@ mono_qnx_image_open (const char *path)
 	uint8_t *base = NULL;
 	size_t span = 0;
 	const char *loader = g_getenv ("MONO_QNX_AOT_LOADER");
+	struct statvfs vfs;
 	int fd;
 
 	if (loader != NULL && strcmp (loader, "dlopen") == 0)
@@ -130,6 +136,9 @@ mono_qnx_image_open (const char *path)
 	fd = open (path, O_RDONLY);
 	if (fd < 0)
 		return NULL; /* dlopen reports the error */
+
+	if (fstatvfs (fd, &vfs) == 0 && (vfs.f_flag & ST_NOEXEC))
+		return refuse (path, "on a filesystem mounted without execute permission", fd, NULL, 0);
 
 	if (pread (fd, &eh, sizeof (eh), 0) != sizeof (eh) || memcmp (eh.e_ident, "\177ELF\1\1", 6) != 0 ||
 	    eh.e_type != QNX_ET_DYN || eh.e_machine != QNX_EM_386 || eh.e_phentsize != sizeof (QnxElfPhdr) ||
