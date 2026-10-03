@@ -19,6 +19,8 @@ add_compile_definitions($<$<COMPILE_LANGUAGE:CXX>:__STDC_FORMAT_MACROS>)
 set(CMAKE_TRY_COMPILE_CONFIGURATION Release)
 
 include(CheckCCompilerFlag)
+include(CheckCSourceCompiles)
+include(CMakePushCheckState)
 include(CheckCXXCompilerFlag)
 include(CheckLinkerFlag)
 
@@ -659,9 +661,21 @@ if (CLR_CMAKE_HOST_UNIX OR CLR_CMAKE_HOST_WASI)
     endif()
   endif()
 
-  # QNX 6.5's libc has no stack-protector runtime (__stack_chk_guard, __stack_chk_fail).
-  if(NOT CLR_CMAKE_HOST_BROWSER AND NOT CLR_CMAKE_HOST_WASI AND NOT CLR_CMAKE_HOST_QNX)
-    add_compile_options(-fstack-protector-strong)
+  if(NOT CLR_CMAKE_HOST_BROWSER AND NOT CLR_CMAKE_HOST_WASI)
+    if(CLR_CMAKE_HOST_QNX)
+      # Not every QNX libc has the stack-protector runtime (__stack_chk_guard,
+      # __stack_chk_fail; QNX 6.5's has not): use it where a protected
+      # function links.
+      cmake_push_check_state()
+      set(CMAKE_REQUIRED_FLAGS "${CMAKE_REQUIRED_FLAGS} -fstack-protector-strong")
+      check_c_source_compiles("
+#include <string.h>
+int main(int argc, char **argv) { char buf[64]; strcpy(buf, argv[argc - 1]); return buf[0]; }" HAVE_STACK_PROTECTOR_RUNTIME)
+      cmake_pop_check_state()
+    endif()
+    if(NOT CLR_CMAKE_HOST_QNX OR HAVE_STACK_PROTECTOR_RUNTIME)
+      add_compile_options(-fstack-protector-strong)
+    endif()
   endif()
 
   # Suppress warnings-as-errors in release branches to reduce servicing churn
