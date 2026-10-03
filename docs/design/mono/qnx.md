@@ -1,9 +1,11 @@
 # QNX 6.5
 
-Mono and the native libraries run on QNX Neutrino 6.5.0 on 32-bit x86. This
-note records where QNX 6.5 differs from Linux in ways that shaped the port:
+Mono and the native libraries run on QNX Neutrino 6.5.0 on 32-bit x86, and
+on BlackBerry 10, QNX on 32-bit ARMv7 (see the last part, "BlackBerry 10").
+This note records where QNX differs from Linux in ways that shaped the port:
 for each, the fact, what it breaks, the solution chosen, and the
-alternatives that were rejected. The facts were measured on QNX 6.5.0 x86.
+alternatives that were rejected. Unless a section says otherwise, the facts
+were measured on QNX 6.5.0 x86.
 
 The port uses the managed libraries of `linux-x86` unmodified. Everything
 QNX-specific is in Mono (`HOST_QNX`), in System.Native (`__QNXNTO__`), and in
@@ -350,11 +352,13 @@ tested.
 
 ## `inotify` by polling
 
-**Fact.** QNX 6.5 has no inotify.
+**Fact.** QNX 6.5 has no inotify. (BlackBerry 10's libc has it, without
+`inotify_init1`; there System.Native uses it, chosen by the `HAVE_INOTIFY`
+configure check, with `inotify_init` and `FD_CLOEXEC`.)
 
 **Consequence.** `FileSystemWatcher` failed with "Not supported".
 
-**Solution** (`pal_inotify_qnx.c`). `SystemNative_INotifyInit` returns the
+**Solution** (`pal_inotify_qnx.c`, where configure finds no inotify). `SystemNative_INotifyInit` returns the
 read end of a pipe, fed by a thread that scans the watched directories with
 `readdir` and `lstat` and writes the differences as `inotify_event` records:
 create, delete, modify, attribute changes, moves paired by inode within one
@@ -451,8 +455,155 @@ an absolute path as a file under `TZDIR`, and knows nothing of rule strings.
 the rule in its footer, under the rule's own name in a private `TZDIR` whose
 other entries link to the real zone directory. `TZ` is unchanged, so libc
 and child processes keep its meaning; with `TZ` unset, the system's rule is
-used and put in `TZ`. Programs ship the IANA zones and point `TZDIR` at
-them.
+used and put in `TZ`. On BlackBerry 10 the system's zone is an IANA name
+(`Europe/Amsterdam`), which its libc reads from `TZ` as well; it is put in
+`TZ` when .NET finds it under `TZDIR`. Programs ship the IANA zones and point
+`TZDIR` at them.
 
-**Rejected.** Rewriting `TZ` for .NET: libc would lose the zone. A zone name
-in `TZ`: libc understands only rule strings and would use UTC.
+**Rejected.** Rewriting `TZ` for .NET: libc would lose the zone. Turning a
+rule into a zone name in `TZ`: QNX 6.5's libc understands only rule strings
+and would use UTC.
+
+# BlackBerry 10
+
+BlackBerry 10 runs BlackBerry's fork of QNX Neutrino (6.5/6.6 era, reporting
+itself as 8.0.0) on 32-bit ARMv7. It is the same operating-system target as
+QNX 6.5 (`-os qnx`), with the ARM architecture (`-arch arm`): where the two
+systems differ, the code chooses by configure checks (`HAVE_*`) or by
+architecture, never by an OS version. The managed libraries are those of
+`linux-arm`, unmodified. The facts in this part were measured on a
+BlackBerry 10 phone (4 Krait cores, VFPv4 and NEON).
+
+## Building for ARM
+
+`eng/native/qnx/build-rootfs.sh --arch arm <rootfs> <sdk>` makes the rootfs
+from a BlackBerry 10 Native SDK (the directory with `target/qnx6`), and
+builds LLVM compiler-rt's builtins into it, since the SDK has no libgcc;
+the SDK is proprietary, and the rootfs is for local builds only. Then
+`./build.sh -os qnx -arch arm -cross` with `ROOTFS_DIR` set builds the
+runtime and the native libraries.
+
+- clang's Linux ARM EABI driver with QNX's predefines; ARMv7-A, VFPv3 and
+  QNX's softfp ABI (floating-point arguments in integer registers), which
+  Mono's ARM code uses unless told otherwise (`mono.proj` asks for hard
+  float only on Linux).
+- lld with two load segments at 4 KiB alignment: QNX's loader fails to load
+  a large library in lld's default layout (three segments at 64 KiB).
+- Constructors stay in `.init_array`, which the ARM loader runs.
+- The AOT cross compiler's triple is `armv7-unknown-nto-qnx6.5.0eabi`.
+
+## What differs from QNX 6.5
+
+| | QNX 6.5 x86 | BlackBerry 10 | In the port |
+|---|---|---|---|
+| ELF TLS | none | none, and no `__aeabi_read_tp` | emulated TLS on both; compiler-rt's on ARM |
+| Stack protector runtime | none | in libc | `HAVE_STACK_PROTECTOR_RUNTIME` |
+| inotify | none | in libc, without `inotify_init1` | `HAVE_INOTIFY` |
+| `<syslog.h>` | yes | no (libc has `syslog`) | `HAVE_SYSLOG_H`; without it, `SysLog` does nothing |
+| Memory commit | eager unless `MAP_LAZY` | lazy, `dlopen` included | the same `MAP_LAZY` code serves both |
+| System time zone | a POSIX rule | an IANA name | `qnxhost` accepts both |
+| Floating-point state in signal handlers | not preserved | not preserved | a trampoline per architecture |
+| CPU features | `cpuid` | no auxiliary vector, no `/proc/cpuinfo` | the system page |
+| Managed libraries | `linux-x86` | `linux-arm` | unmodified on both |
+
+## Signal handlers and VFP state
+
+**Fact.** As QNX 6.5 does with the FPU/SSE registers, BlackBerry 10 does not
+preserve the interrupted code's VFP registers around a signal handler that
+uses them (lost in 4,455 of 4,462 handler runs in a probe), and the handler
+starts with the interrupted code's FPSCR.
+
+**Solution.** Mono's and System.Native's handlers are entered through an ARM
+trampoline beside the x86 one: it saves d0-d31 and FPSCR on an 8-byte
+aligned stack, runs the handler with the default FPSCR, and restores them.
+The trampolines are naked functions with `target("arm")`: written as
+top-level assembly in a Thumb-compiled file, the assembler gave the symbol
+the Thumb bit, and the kernel entered ARM code in Thumb state.
+
+## The instruction cache
+
+**Fact.** compiler-rt's `__clear_cache` has no QNX implementation; it calls
+`abort ()`.
+
+**Solution.** On QNX, `mono_arch_flush_icache` uses QNX's `msync` on whole
+pages: `MS_SYNC | MS_CACHE_ONLY` to clean the data cache, then
+`MS_INVALIDATE_ICACHE`.
+
+## CPU features
+
+**Fact.** QNX has neither the auxiliary vector nor `/proc/cpuinfo`, so Mono
+found neither ARMv7 nor VFP.
+
+**Solution.** `mono-hwcap-arm.c` reads the system page
+(`SYSPAGE_ENTRY (cpuinfo)->flags`: `ARM_CPU_FLAG_V7`, `CPU_FLAG_FPU`), and
+Mono's CMake sets `HAVE_ARMV7` from what the compiler targets, so that the
+runtime, the JIT and the AOT compiler agree.
+
+## Stale pages after an inode is reused
+
+**Fact.** BlackBerry 10 maps, `dlopen`s and executes a file written into the
+inode of a deleted file that was mapped or executed with the deleted file's
+cached pages, while `read ()` returns the new contents. Truncating the old
+file, `fsync` and reading the new one do not clear it;
+`msync (MS_INVALIDATE)` on a mapping of the new file does, for every later
+mapping, `dlopen` and `exec` of it. An upgrade in place, which deletes the
+old files and writes new ones, does exactly this.
+
+**Consequence.** After an upgrade, assemblies mapped as the files they
+replaced (the runtime found no assembly in them), libraries loaded without
+their symbols, and programs failed to start ("Can't access shared library").
+
+**Solution.**
+- Mono's file mapping on QNX compares the first page of each new mapping with
+  `read ()` and invalidates the mapping when they differ: the files mapped
+  there begin with content-specific headers (an assembly's PE header carries
+  a hash of its content).
+- The AOT image loader does the same before anything can refuse an image, so
+  the `dlopen` fallback gets the right pages too. Two builds of an image can
+  share their first page; the AOT runtime then refuses the image on its
+  assembly GUID, and the JIT compiles the methods.
+- `qnxhost` invalidates the runtime and every shared library in
+  `NATIVE_DLL_SEARCH_DIRECTORIES` before loading the runtime.
+
+On the phone, the guards cost about 0.1 s at startup each.
+
+**Not covered.** The launcher itself (a copy of `qnxhost`) cannot invalidate
+its own executable: if it fails to start right after an upgrade, a reboot
+clears the stale pages. The names of loaded modules other than the main
+module, as the process manager reports them, can be a deleted file's after a
+reinstall; `/proc/<pid>/exe` (and so `Environment.ProcessPath`) and the main
+module's name come from `DCMD_PROC_MAPDEBUG_BASE`, which is right.
+
+## Ahead-of-time code on ARM
+
+**Fact.** The ARM backend takes the EABI calling convention (64-bit
+arguments in aligned register pairs) from `__ARM_EABI__` when it runs as the
+JIT, but in a cross compiler built for another host only from the `mtriple`
+AOT option, and only for "gnueabi" triples.
+
+**Consequence.** Images compiled without it used the old ARM convention, and
+calls between them and JIT code passed 64-bit arguments in the wrong
+registers.
+
+**Solution.** Any triple containing "eabi" selects the EABI convention, and
+the images are compiled with `mtriple=armv7-unknown-nto-qnx6.5.0eabi`. They
+have the same shape as on x86 (two load segments, only `R_ARM_RELATIVE`
+relocations in the writable one), and the lazy image loader takes the host's
+machine and relocation type. With the hot set precompiled, PowerShell starts
+in about 4.4 s on the phone instead of 15.6 s.
+
+## Limitations
+
+- Programs cannot run from the SD card (FAT, mounted without execute
+  permission), and code mapped from it faults; the AOT image loader leaves
+  images on such a filesystem to `dlopen`.
+- A process that is not root sees only its own processes (`/proc/<pid>/as`
+  is root-only), so `Process.GetProcesses` returns only the user's own.
+- Pinging (`System.Net.NetworkInformation.Ping`) is not available: without
+  root, .NET runs the system's `ping`, which ordinary users cannot execute on
+  BlackBerry 10, and programs from outside the system cannot run as root
+  (root's loader refuses them). The raw-socket ICMP emulation of QNX 6.5
+  (see "Raw sockets and ping") is therefore never used there.
+- The system's ICU (49) is older than .NET's minimum, so globalization is
+  invariant, as on QNX 6.5.
+
