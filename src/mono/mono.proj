@@ -450,10 +450,10 @@ JS_ENGINES = [NODE_JS]
       <_MonoBuildEnv Include="TARGET_BUILD_ARCH=x64" />
     </ItemGroup>
 
-    <!-- x86 QNX Neutrino cross build options. The toolchain is repo-owned: eng/common is Arcade's. -->
+    <!-- QNX Neutrino (x86, arm) cross build options. The toolchain is repo-owned: eng/common is Arcade's. -->
     <ItemGroup Condition="'$(TargetsQNX)' == 'true' and '$(MonoCrossDir)' != ''">
       <_MonoCMakeArgs Include="-DCMAKE_TOOLCHAIN_FILE=$(RepositoryEngineeringDir)native/qnx/toolchain.cmake" />
-      <_MonoBuildEnv Include="TARGET_BUILD_ARCH=x86" />
+      <_MonoBuildEnv Include="TARGET_BUILD_ARCH=$(TargetArchitecture)" />
     </ItemGroup>
 
     <!-- x64 linux cross build options -->
