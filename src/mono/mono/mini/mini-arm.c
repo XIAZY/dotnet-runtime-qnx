@@ -13,6 +13,9 @@
  */
 #include "mini.h"
 #include <string.h>
+#ifdef HOST_QNX
+#include <sys/mman.h>
+#endif
 
 #include <mono/metadata/abi-details.h>
 #include <mono/metadata/appdomain.h>
@@ -1060,6 +1063,17 @@ mono_arch_flush_icache (guint8 *code, gint size)
 #if defined(MONO_CROSS_COMPILE)
 #elif __APPLE__
 	sys_icache_invalidate (code, size);
+#elif defined(HOST_QNX)
+	/*
+	 * compiler-rt's __clear_cache has no QNX implementation (it aborts).
+	 * QNX's msync does it on whole pages: first clean the data cache, so
+	 * that the new code is in memory, then invalidate the instruction cache.
+	 */
+	gsize page = mono_pagesize ();
+	gsize start = (gsize)code & ~(page - 1);
+	gsize len = (gsize)code + size - start;
+	msync ((void *)start, len, MS_SYNC | MS_CACHE_ONLY);
+	msync ((void *)start, len, MS_INVALIDATE_ICACHE);
 #else
     __builtin___clear_cache ((char*)code, (char*)code + size);
 #endif
