@@ -1,17 +1,18 @@
 /**
  * \file
- * Signal handlers that preserve the FPU and SSE state on QNX Neutrino.
+ * Signal handlers that preserve the floating-point state on QNX Neutrino.
  *
- * QNX 6.5 does not reliably save the interrupted code's FPU/SSE registers
+ * QNX does not reliably save the interrupted code's floating-point registers
  * around a signal handler: when the handler uses them, the interrupted code
- * finds them changed after about 9 handler runs in 10 (measured on QNX
- * 6.5.0). The runtime is built with SSE2, so any C code,
- * handlers included, may use xmm registers. Every handler is therefore
- * entered through a trampoline, written in assembly so that no compiler
- * generated code runs first, which saves the state with fxsave, calls the
- * handler, and restores the state with fxrstor. Between the two, the
- * handler runs from a clean state, as it would on Linux: direction flag
- * clear, x87 initialised, MXCSR at its default.
+ * finds them changed, after about 9 handler runs in 10 on QNX 6.5.0 x86
+ * (FPU/SSE registers) and nearly every run on BlackBerry 10's ARM QNX (VFP
+ * registers; the handler also starts with the interrupted code's FPSCR).
+ * Any C code, handlers included, may use those registers. Every handler is
+ * therefore entered through a trampoline, written in assembly so that no
+ * compiler generated code runs first, which saves the state, calls the
+ * handler, and restores the state. Between the two, the handler runs from a
+ * clean state, as it would on Linux: on x86, direction flag clear, x87
+ * initialised, MXCSR at its default; on ARM, FPSCR at its default.
  *
  * Copyright (c) Xia Zhongyang.
  * Licensed under the MIT License.
@@ -19,7 +20,7 @@
 
 #include <config.h>
 
-#if defined(HOST_QNX) && defined(TARGET_X86)
+#if defined(HOST_QNX) && (defined(TARGET_X86) || defined(TARGET_ARM))
 
 #include <mono/utils/mono-signal-qnx.h>
 #include <glib.h>
@@ -33,6 +34,7 @@ MonoQnxSignalHandler mono_qnx_signal_handlers [_SIGMAX + 1];
 
 void mono_qnx_signal_trampoline (int signo, siginfo_t *info, void *context);
 
+#if defined(TARGET_X86)
 /*
  * The fxsave area is 512 bytes and must be 16-byte aligned, and the stack is
  * only 4-byte aligned on QNX. The handler table is reached through the GOT,
@@ -79,6 +81,50 @@ __asm__ (
 	"	ret\n"
 	".size mono_qnx_signal_trampoline, .-mono_qnx_signal_trampoline\n"
 );
+#else
+/*
+ * ARM mode, whichever mode the runtime is compiled in, since QNX may enter
+ * the handler with a plain branch. d0-d31 and FPSCR are saved on the stack,
+ * 8-byte aligned; every BlackBerry 10 device has 32 double registers (VFPv3
+ * D32, which the runtime is built for). The default FPSCR is 0: round to
+ * nearest, no exception traps, no flush to zero, no default NaN. signo, info
+ * and context stay in r0-r2 for the handler.
+ */
+__asm__ (
+	".text\n"
+	".p2align 2\n"
+	".arm\n"
+	".globl mono_qnx_signal_trampoline\n"
+	".hidden mono_qnx_signal_trampoline\n"
+	".type mono_qnx_signal_trampoline, %function\n"
+	"mono_qnx_signal_trampoline:\n"
+	"	push {r4, r5, r6, lr}\n"
+	"	mov r6, sp\n"
+	"	sub sp, sp, #264\n"		/* d0-d31, FPSCR, and room to align */
+	"	bic sp, sp, #7\n"
+	"	vstmia sp, {d0-d15}\n"
+	"	add r4, sp, #128\n"
+	"	vstmia r4, {d16-d31}\n"
+	"	vmrs r5, fpscr\n"
+	"	str r5, [sp, #256]\n"
+	"	mov r5, #0\n"
+	"	vmsr fpscr, r5\n"
+	"	ldr r4, 2f\n"
+	"1:	add r4, pc, r4\n"		/* mono_qnx_signal_handlers, a hidden symbol */
+	"	ldr r3, [r4, r0, lsl #2]\n"
+	"	cmp r3, #0\n"
+	"	blxne r3\n"
+	"	ldr r5, [sp, #256]\n"
+	"	vmsr fpscr, r5\n"
+	"	vldmia sp, {d0-d15}\n"
+	"	add r4, sp, #128\n"
+	"	vldmia r4, {d16-d31}\n"
+	"	mov sp, r6\n"
+	"	pop {r4, r5, r6, pc}\n"
+	"2:	.word mono_qnx_signal_handlers - (1b + 8)\n"
+	".size mono_qnx_signal_trampoline, .-mono_qnx_signal_trampoline\n"
+);
+#endif
 
 /* Mono's SIGBUS handler, called by qnx_sigbus_handler. */
 static MonoQnxSignalHandler qnx_sigbus_next;
