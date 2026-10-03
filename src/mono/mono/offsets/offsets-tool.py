@@ -178,6 +178,21 @@ class OffsetsTool:
 					self.target_args += ["-isystem", prefix + "/include"]
 			self.target_args += ["-isystem", args.sysroot + "/usr/lib/gcc/i486-pc-nto-qnx6.5.0/4.4.2/include"]
 			self.target_args += ["-isystem", args.sysroot + "/usr/include"]
+		elif "armv7-unknown-nto-qnx6.5.0eabi" == args.abi:
+			# QNX on 32-bit ARMv7 (BlackBerry 10), with its headers from --sysroot
+			# (see eng/native/qnx/build-rootfs.sh --arch arm). As for x86, clang's
+			# Linux driver with QNX's predefines and headers; the ARM EABI aligns
+			# 64-bit types to 8 bytes, and QNX's ABI is softfp.
+			require_sysroot (args)
+			self.target = Target ("TARGET_ARM", "TARGET_QNX", ["HOST_QNX", "MONO_CROSS_COMPILE", "USE_MONO_CTX", "ARM_FPU_VFP", "HAVE_ARMV5", "HAVE_ARMV6", "HAVE_ARMV7"])
+			self.target_args += ["--target=armv7-pc-linux-gnueabi", "-mfloat-abi=softfp", "-nostdinc"]
+			self.target_args += ["-U__linux__", "-U__linux", "-Ulinux", "-U__gnu_linux__", "-Uunix"]
+			self.target_args += ["-D__QNX__", "-D__QNXNTO__", "-D__unix__", "-D__unix", "-D__ELF__", "-D__ARM__",
+								 "-D__LITTLEENDIAN__", "-D__LANGUAGE_C", "-D_LANGUAGE_C"]
+			if args.prefixes:
+				for prefix in args.prefixes:
+					self.target_args += ["-isystem", prefix + "/include"]
+			self.target_args += ["-isystem", args.sysroot + "/usr/include"]
 		elif "aarch64-linux-gnu" == args.abi:
 			require_sysroot (args)
 			self.target = Target ("TARGET_ARM64", None, LINUX_DEFINES)
