@@ -101,6 +101,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <libgen.h>
@@ -423,6 +424,63 @@ static const void *pinvoke_override(const char *library, const char *entry)
 	return NULL;
 }
 
+/*
+ * BlackBerry 10's QNX maps, dlopens and executes a file written into the inode
+ * of a deleted file that was mapped or executed with the deleted file's cached
+ * pages, while read() returns the new contents (measured; truncating the old
+ * file, fsync and reading the new one do not clear it, and an upgrade in place
+ * does exactly this). msync(MS_INVALIDATE) on a mapping of the new file makes
+ * every later mapping, dlopen and exec of it see its contents, so the runtime
+ * and the native libraries the program may load get that before any of them
+ * is loaded. The runtime does the same for the assemblies it maps. A failure
+ * only means the file is used as it is.
+ */
+static void invalidate_file(const char *path)
+{
+	struct stat st;
+	void *p;
+	int fd = open(path, O_RDONLY);
+
+	if (fd < 0)
+		return;
+	if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0 &&
+	    (p = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_SHARED, fd, 0)) != MAP_FAILED) {
+		msync(p, (size_t)st.st_size, MS_INVALIDATE);
+		munmap(p, (size_t)st.st_size);
+	}
+	close(fd);
+}
+
+static void invalidate_libraries(void)
+{
+	const char *dirs = NULL;
+
+	invalidate_file(runtime_path);
+	for (int i = 0; i < nproperties; i++)
+		if (strcmp(keys[i], "NATIVE_DLL_SEARCH_DIRECTORIES") == 0)
+			dirs = values[i];
+	while (dirs != NULL && *dirs != '\0') {
+		const char *end = strchr(dirs, ':');
+		size_t n = end != NULL ? (size_t)(end - dirs) : strlen(dirs);
+		char dir[PATH_MAX], path[PATH_MAX];
+		DIR *d;
+		struct dirent *e;
+
+		snprintf(dir, sizeof dir, "%.*s", (int)n, dirs);
+		if (n > 0 && (d = opendir(dir)) != NULL) {
+			while ((e = readdir(d)) != NULL) {
+				size_t len = strlen(e->d_name);
+				if ((len > 3 && strcmp(e->d_name + len - 3, ".so") == 0) || strstr(e->d_name, ".so.") != NULL) {
+					snprintf(path, sizeof path, "%s/%s", dir, e->d_name);
+					invalidate_file(path);
+				}
+			}
+			closedir(d);
+		}
+		dirs = end != NULL ? end + 1 : NULL;
+	}
+}
+
 static void *runtime_thread(void *arg)
 {
 	void *lib;
@@ -435,6 +493,7 @@ static void *runtime_thread(void *arg)
 	const char *mode;
 
 	(void)arg;
+	invalidate_libraries();
 	lib = dlopen(runtime_path, RTLD_NOW | RTLD_GLOBAL);
 	if (lib == NULL)
 		fail("cannot load the runtime", dlerror());
