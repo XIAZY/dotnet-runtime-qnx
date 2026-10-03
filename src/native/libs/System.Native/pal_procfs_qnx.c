@@ -391,15 +391,30 @@ static bool QnxMappedPath(int as, unsigned dcmd, uint64_t vaddr, bool self, char
 // Linux's maps lines: address range, permissions, offset, device, inode and
 // path. Only file mappings get a path; .NET builds Process.Modules from the
 // readable and executable ones.
+//
+// The executable's own mappings are named from DCMD_PROC_MAPDEBUG_BASE, as the
+// exe link is, matched by device and inode: on BlackBerry 10, the name
+// procnto gives a mapping (DCMD_PROC_MAPDEBUG) can be that of a deleted file
+// whose inode the mapped file reuses, which made Process.MainModule a file
+// of a deleted directory after a reinstall, while DCMD_PROC_MAPDEBUG_BASE
+// stayed right. Other mappings have no better source.
 static void QnxRenderMaps(int as, bool self, QnxText* text)
 {
     int count;
+    char exe[1100];
+    struct stat exeStat;
+    bool haveExe =
+        QnxMappedPath(as, DCMD_PROC_MAPDEBUG_BASE, 0, self, exe, sizeof(exe)) && stat(exe, &exeStat) == 0;
     procfs_mapinfo* maps = QnxReadMaps(as, DCMD_PROC_MAPINFO, &count);
     for (int i = 0; i < count; i++)
     {
         char path[1100];
         uint32_t flags = maps[i].flags;
-        if (!QnxMappedPath(as, DCMD_PROC_MAPDEBUG, maps[i].vaddr, self, path, sizeof(path)))
+        if (haveExe && maps[i].dev == exeStat.st_dev && (uint64_t)maps[i].ino == (uint64_t)exeStat.st_ino)
+        {
+            snprintf(path, sizeof(path), "%s", exe);
+        }
+        else if (!QnxMappedPath(as, DCMD_PROC_MAPDEBUG, maps[i].vaddr, self, path, sizeof(path)))
         {
             path[0] = '\0';
         }
