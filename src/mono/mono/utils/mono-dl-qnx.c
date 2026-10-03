@@ -17,8 +17,9 @@
  *
  * It handles exactly what the AOT compiler emits for QNX, and refuses
  * anything else, in which case mono_dl_open () falls back to dlopen: a 32-bit
- * x86 ET_DYN with two LOAD segments (R+X, then R+W), only R_386_RELATIVE
- * relocations, all in the writable segment, no initialisers, no needed
+ * ET_DYN for the host (x86 or ARM) with two LOAD segments (R+X, then R+W),
+ * only relative relocations (R_386_RELATIVE, R_ARM_RELATIVE), all in the
+ * writable segment, no initialisers, no needed
  * libraries, no TLS, and the symbols looked up through the SysV hash table.
  *
  * MONO_QNX_AOT_LOADER=dlopen disables it; MONO_QNX_AOT_LOADER_VERBOSE prints
@@ -41,13 +42,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <unistd.h>
 
 #include <glib.h>
 #include "mono/utils/mono-dl-qnx.h"
 
-/* The ELF structures and values used, from the ELF and i386 psABI specifications. */
+/* The ELF structures and values used, from the ELF, i386 psABI and ARM ELF specifications. */
 typedef struct {
 	unsigned char e_ident [16];
 	uint16_t e_type, e_machine;
@@ -75,7 +77,7 @@ typedef struct {
 } QnxElfRel;
 
 enum {
-	QNX_ET_DYN = 3, QNX_EM_386 = 3,
+	QNX_ET_DYN = 3, QNX_EM_386 = 3, QNX_EM_ARM = 40,
 	QNX_PT_LOAD = 1, QNX_PT_DYNAMIC = 2, QNX_PT_INTERP = 3, QNX_PT_TLS = 7,
 	QNX_PF_X = 1, QNX_PF_W = 2, QNX_PF_R = 4,
 	QNX_DT_NULL = 0, QNX_DT_NEEDED = 1, QNX_DT_PLTRELSZ = 2, QNX_DT_HASH = 4, QNX_DT_STRTAB = 5,
@@ -83,9 +85,20 @@ enum {
 	QNX_DT_RELSZ = 18, QNX_DT_RELENT = 19, QNX_DT_TEXTREL = 22, QNX_DT_JMPREL = 23,
 	QNX_DT_INIT_ARRAY = 25, QNX_DT_FINI_ARRAY = 26, QNX_DT_FLAGS = 30, QNX_DT_PREINIT_ARRAY = 32,
 	QNX_DF_TEXTREL = 4,
-	QNX_R_386_RELATIVE = 8,
+	QNX_R_386_RELATIVE = 8, QNX_R_ARM_RELATIVE = 23,
 	QNX_PAGE = 4096,
 };
+
+/* The host's machine and its one relocation type. */
+#if defined(HOST_ARM)
+#define QNX_EM_HOST QNX_EM_ARM
+#define QNX_R_RELATIVE QNX_R_ARM_RELATIVE
+#define QNX_HOST_NAME "ARM"
+#else
+#define QNX_EM_HOST QNX_EM_386
+#define QNX_R_RELATIVE QNX_R_386_RELATIVE
+#define QNX_HOST_NAME "x86"
+#endif
 
 struct _MonoQnxImage {
 	uint8_t *base;
@@ -117,6 +130,39 @@ refuse (const char *path, const char *reason, int fd, uint8_t *base, size_t span
 	return NULL;
 }
 
+/*
+ * BlackBerry 10's QNX maps and dlopens a file written into the inode of a
+ * deleted file that was mapped or executed with the deleted file's cached
+ * pages, while read() returns the new contents (measured; an image replaced
+ * in place, by an upgrade, is the case here). msync(MS_INVALIDATE) on a
+ * mapping of the file makes every later mapping and dlopen of it see its
+ * contents. It is done when the first page mapped differs from what read()
+ * returns. Two builds of an image can share their first page when only code
+ * differs, so this does not catch every stale image; such an image belongs
+ * to another build of its assembly, and the AOT runtime refuses it on the
+ * assembly GUID it records, so the method runs from the JIT instead. It runs
+ * before anything can refuse the image, so that the dlopen fallback does not
+ * get stale pages either.
+ */
+static void
+invalidate_if_stale (int fd)
+{
+	struct stat st;
+	uint8_t head [QNX_PAGE];
+	uint8_t *p;
+	size_t n;
+
+	if (fstat (fd, &st) != 0 || st.st_size <= 0)
+		return;
+	p = (uint8_t *)mmap (NULL, (size_t)st.st_size, PROT_READ, MAP_SHARED | MAP_LAZY, fd, 0);
+	if (p == MAP_FAILED)
+		return;
+	n = st.st_size < QNX_PAGE ? (size_t)st.st_size : QNX_PAGE;
+	if (pread (fd, head, n, 0) != (ssize_t)n || memcmp (p, head, n) != 0)
+		msync (p, (size_t)st.st_size, MS_INVALIDATE);
+	munmap (p, (size_t)st.st_size);
+}
+
 MonoQnxImage *
 mono_qnx_image_open (const char *path)
 {
@@ -136,14 +182,15 @@ mono_qnx_image_open (const char *path)
 	fd = open (path, O_RDONLY);
 	if (fd < 0)
 		return NULL; /* dlopen reports the error */
+	invalidate_if_stale (fd);
 
 	if (fstatvfs (fd, &vfs) == 0 && (vfs.f_flag & ST_NOEXEC))
 		return refuse (path, "on a filesystem mounted without execute permission", fd, NULL, 0);
 
 	if (pread (fd, &eh, sizeof (eh), 0) != sizeof (eh) || memcmp (eh.e_ident, "\177ELF\1\1", 6) != 0 ||
-	    eh.e_type != QNX_ET_DYN || eh.e_machine != QNX_EM_386 || eh.e_phentsize != sizeof (QnxElfPhdr) ||
+	    eh.e_type != QNX_ET_DYN || eh.e_machine != QNX_EM_HOST || eh.e_phentsize != sizeof (QnxElfPhdr) ||
 	    eh.e_phnum == 0 || eh.e_phnum > G_N_ELEMENTS (ph))
-		return refuse (path, "not a 32-bit x86 shared object of the expected shape", fd, NULL, 0);
+		return refuse (path, "not a 32-bit " QNX_HOST_NAME " shared object of the expected shape", fd, NULL, 0);
 	if (pread (fd, ph, eh.e_phnum * sizeof (QnxElfPhdr), eh.e_phoff) != (ssize_t)(eh.e_phnum * sizeof (QnxElfPhdr)))
 		return refuse (path, "short program header table", fd, NULL, 0);
 
@@ -231,9 +278,9 @@ mono_qnx_image_open (const char *path)
 	const QnxElfRel *rels = (const QnxElfRel *)(base + rel);
 	size_t nrel = relsz / sizeof (QnxElfRel);
 	for (size_t i = 0; i < nrel; ++i) {
-		if (rels [i].r_info != QNX_R_386_RELATIVE ||
+		if (rels [i].r_info != QNX_R_RELATIVE ||
 		    rels [i].r_offset < data->p_vaddr || rels [i].r_offset + 4 > data->p_vaddr + data->p_filesz)
-			return refuse (path, "a relocation other than R_386_RELATIVE in the data segment", -1, base, span);
+			return refuse (path, "a relocation other than a relative one in the data segment", -1, base, span);
 	}
 	for (size_t i = 0; i < nrel; ++i) {
 		uint32_t *where = (uint32_t *)(base + rels [i].r_offset);
