@@ -15,7 +15,9 @@
 #include <sys/resource.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#if HAVE_SYSLOG_H
 #include <syslog.h>
+#endif
 #include <unistd.h>
 #if HAVE_CRT_EXTERNS_H
 #include <crt_externs.h>
@@ -41,6 +43,7 @@
 
 #include <minipal/getexepath.h>
 
+#if HAVE_SYSLOG_H
 // Validate that our SysLogPriority values are correct for the platform
 c_static_assert(PAL_LOG_EMERG == LOG_EMERG);
 c_static_assert(PAL_LOG_ALERT == LOG_ALERT);
@@ -50,6 +53,7 @@ c_static_assert(PAL_LOG_WARNING == LOG_WARNING);
 c_static_assert(PAL_LOG_NOTICE == LOG_NOTICE);
 c_static_assert(PAL_LOG_INFO == LOG_INFO);
 c_static_assert(PAL_LOG_DEBUG == LOG_DEBUG);
+#endif
 
 // Validate that out PriorityWhich values are correct for the platform
 c_static_assert(PAL_PRIO_PROCESS == (int)PRIO_PROCESS);
@@ -710,7 +714,14 @@ int32_t SystemNative_GetSid(int32_t pid)
 
 void SystemNative_SysLog(SysLogPriority priority, const char* message, const char* arg1)
 {
+#if HAVE_SYSLOG_H
     syslog((int)(LOG_USER | priority), message, arg1);
+#else
+    // No <syslog.h>: nothing to log to.
+    (void)priority;
+    (void)message;
+    (void)arg1;
+#endif
 }
 
 int32_t SystemNative_WaitIdAnyExitedNoHangNoWait(void)
