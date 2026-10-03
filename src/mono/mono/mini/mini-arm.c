@@ -7384,7 +7384,8 @@ mono_arch_set_target (char *mtriple)
 		thumb_supported = TRUE;
 		iphone_abi = TRUE;
 	}
-	if (strstr (mtriple, "gnueabi"))
+	/* gnueabi, androideabi, and QNX's armv7-unknown-nto-qnx6.5.0eabi */
+	if (strstr (mtriple, "eabi"))
 		eabi_supported = TRUE;
 }
 
