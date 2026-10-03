@@ -18,6 +18,14 @@ if (CLR_CMAKE_HOST_IOS OR CLR_CMAKE_HOST_TVOS OR CLR_CMAKE_HOST_ANDROID)
   set(FEATURE_PERFTRACING_DISABLE_DEFAULT_LISTEN_PORT 1)
 endif()
 
+# QNX: no default listen port, a Unix socket name bound at every start and
+# unlinked at every exit (unlinking a socket's name can hang QNX 6.5's network
+# stack, and a signal during a bind can stop BlackBerry 10's). Diagnostic ports
+# can still be asked for with DOTNET_DiagnosticPorts.
+if (CLR_CMAKE_HOST_OS STREQUAL "qnx")
+  set(FEATURE_PERFTRACING_DISABLE_DEFAULT_LISTEN_PORT 1)
+endif()
+
 check_include_file(
     linux/user_events.h
     HAVE_LINUX_USER_EVENTS_H
