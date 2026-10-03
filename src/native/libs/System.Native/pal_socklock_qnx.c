@@ -20,28 +20,31 @@
 // unlinks).
 //
 // Across processes: under the in-process lock, an fcntl record lock on
-// /tmp/qnxhost-<uid>/socket.lock, the private per-user directory qnxhost
-// makes, is taken shared around the same calls and exclusively around the
-// unlink of a socket name, so that every process of one user that uses this
-// library keeps its unlinks apart from the others' socket calls (a program and
-// its child processes, for example): deleting a socket name in one process
-// while another process makes socket calls can deadlock io-pkt, and an
-// in-process lock cannot cover that. A pair of fcntl calls costs 16-20 us on
-// QNX 6.5. Record locks belong to the process, not the thread: the first
-// thread to take the shared side takes the file's read lock and the last one
-// releases it; and they vanish when the process closes any descriptor on the
-// file, so the file is opened once, on a descriptor kept for the process's
-// lifetime. qnxhost makes the directory in every configuration; only if it
-// cannot (or the directory is not this user's alone) is the file lock left
-// out, with a warning. Other users' processes and foreign programs (sshd) are
-// not covered.
+// socket.lock in qnxhost-<uid>, the private per-user directory qnxhost makes
+// in $TMPDIR (/tmp when it is unset or empty; a TMPDIR that already names such
+// a directory is that directory), is taken shared around the same calls and
+// exclusively around the unlink of a socket name, so that every process of one
+// user that uses this library keeps its unlinks apart from the others' socket
+// calls (a program and its child processes, for example): deleting a socket
+// name in one process while another process makes socket calls can deadlock
+// io-pkt, and an in-process lock cannot cover that. A pair of fcntl calls
+// costs 16-20 us on QNX 6.5. Record locks belong to the process, not the
+// thread: the first thread to take the shared side takes the file's read lock
+// and the last one releases it; and they vanish when the process closes any
+// descriptor on the file, so the file is opened once, on a descriptor kept for
+// the process's lifetime. qnxhost makes the directory in every configuration;
+// only if it cannot (or the directory is not this user's alone) is the file
+// lock left out, with a warning. Other users' processes and foreign programs
+// (sshd) are not covered.
 
 #include "pal_config.h"
 #include "pal_socklock_qnx.h"
 
 #include <fcntl.h>
+#include <limits.h>
 #include <pthread.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -57,10 +60,31 @@ static int g_qnxLockFileShared;
 
 static void QnxOpenLockFile(void)
 {
-    char dir[64], path[96];
+    char dir[PATH_MAX], path[PATH_MAX], name[32];
+    const char* tmp = getenv("TMPDIR");
+    size_t len, nameLen;
     struct stat st;
 
-    snprintf(dir, sizeof(dir), "/tmp/qnxhost-%u", (unsigned)getuid());
+    // The same rule as qnxhost's private_tmpdir.
+    if (tmp == NULL || tmp[0] == '\0')
+    {
+        tmp = "/tmp";
+    }
+    len = strlen(tmp);
+    while (len > 1 && tmp[len - 1] == '/')
+    {
+        len--;
+    }
+    nameLen = (size_t)snprintf(name, sizeof(name), "qnxhost-%u", (unsigned)getuid());
+    if (len > nameLen && tmp[len - nameLen - 1] == '/' && strncmp(tmp + len - nameLen, name, nameLen) == 0)
+    {
+        snprintf(dir, sizeof(dir), "%.*s", (int)len, tmp);
+    }
+    else if (snprintf(dir, sizeof(dir), "%.*s/%s", (int)len, tmp, name) >= (int)sizeof(dir))
+    {
+        fprintf(stderr, "System.Native: TMPDIR is too long; socket names are locked within this process only\n");
+        return;
+    }
     if (lstat(dir, &st) != 0 || !S_ISDIR(st.st_mode) || st.st_uid != getuid() || (st.st_mode & 077) != 0)
     {
         fprintf(stderr, "System.Native: no private directory %s; socket names are locked within this process only\n", dir);

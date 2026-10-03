@@ -249,15 +249,16 @@ socket.
 shared around the socket control calls (`socket`, `bind`, `listen`,
 `connect` and `accept` on non-blocking descriptors, the option and name
 calls) and `close`, and exclusively around the unlink of a name that `lstat`
-reports as a socket. Under it, an `fcntl` record lock on
-`/tmp/qnxhost-<uid>/socket.lock` does the same between the processes of one
-user; record locks belong to the process, so the first thread to take the
-shared side takes the read lock and the last releases it. A pair of `fcntl`
-calls costs 16-20 µs. Reads, writes and the event port's arms stay unlocked:
-700,440 transfers overlapping 20,000 locked unlinks, and about 49,000 arms
-overlapping 4,000, caused no deadlock. `qnxhost` also gives programs a
-private temporary directory, where .NET creates its named pipes, so that
-programs listing `/tmp` don't touch those names.
+reports as a socket. Under it, an `fcntl` record lock on `socket.lock` in
+`qnxhost-<uid>`, a private directory in `$TMPDIR` (`/tmp` when unset), does
+the same between the processes of one user; record locks belong to the
+process, so the first thread to take the shared side takes the read lock and
+the last releases it. A pair of `fcntl` calls costs 16-20 µs. Reads, writes
+and the event port's arms stay unlocked: 700,440 transfers overlapping
+20,000 locked unlinks, and about 49,000 arms overlapping 4,000, caused no
+deadlock. `qnxhost` also gives programs a private temporary directory, where
+.NET creates its named pipes, so that programs listing `/tmp` don't touch
+those names.
 
 The locks cover only the concurrent form; nothing can make a lone unlink
 safe. What protects a program is creating no names in ordinary use: Mono

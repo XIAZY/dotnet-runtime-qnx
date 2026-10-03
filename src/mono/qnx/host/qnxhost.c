@@ -52,11 +52,15 @@
  *  - Runs the runtime on a thread with an 8 MiB stack: the main thread's
  *    is 512 KiB on QNX, and the interpreter needs more. The stack is lazy,
  *    so only the pages used take memory.
- *  - Makes a private directory, /tmp/qnxhost-<uid> (mode 0700), in every
- *    configuration: System.Native keeps its cross-process socket lock file
- *    there. It gives the program that directory as TMPDIR, unless
- *    TMPDIR is set already (by the environment or the props file) or
- *    QNXHOST_PRIVATE_TMPDIR=0.
+ *  - Makes a private directory, qnxhost-<uid> (mode 0700) in TMPDIR, or in
+ *    /tmp when TMPDIR is unset or empty, in every configuration:
+ *    System.Native keeps its cross-process socket lock file there and
+ *    finds it the same way (pal_socklock_qnx.c). A TMPDIR that already
+ *    names such a directory (a parent qnxhost's) is that directory. On
+ *    BlackBerry 10, /tmp is /dev/shmem, which holds no directories, and
+ *    applications get a TMPDIR of their own. It gives the program that
+ *    directory as TMPDIR, unless TMPDIR is set already (by the environment
+ *    or the props file) or QNXHOST_PRIVATE_TMPDIR=0.
  *    .NET makes the Unix sockets of named pipes in the temporary directory
  *    and deletes them when they close, and on QNX 6.5 unlinking a socket's
  *    name while io-pkt serves another request from any process deadlocks
@@ -74,7 +78,7 @@
  *    to UTC); QNX's libc knows only rule strings and parses TZ again on
  *    every mktime, so TZ itself must not change. The rule is written as a
  *    one-transition TZif file (the rule in its footer) at the relative path
- *    the rule spells out, in /tmp/qnxhost-<uid>/zoneinfo-<hash>, a directory
+ *    the rule spells out, in qnxhost-<uid>/zoneinfo-<hash>, a directory
  *    that otherwise holds symlinks to every entry of the real TZDIR (the
  *    tree's etc/zoneinfo, or the user's); TZDIR then names that directory.
  *    .NET's local zone is then the rule, its id the rule string, while libc
@@ -469,19 +473,35 @@ static void print_mallinfo(void)
 		m.arena, m.uordblks + m.usmblks, m.fordblks + m.fsmblks, m.usmblks, m.fsmblks);
 }
 
-/* /tmp/qnxhost-<uid> once private_tmpdir has made or checked it, else NULL. */
+/* The private directory, resolved, once private_tmpdir has made or checked
+ * it, else NULL. */
 static const char *private_dir;
 
-/* Sets TMPDIR to /tmp/qnxhost-<uid>; see the comment at the top. */
+/* Sets TMPDIR to the private directory; see the comment at the top. */
 static void private_tmpdir(void)
 {
 	const char *opt = getenv("QNXHOST_PRIVATE_TMPDIR");
-	static char dir[64];
+	const char *tmp = getenv("TMPDIR");
+	static char dir[PATH_MAX];
+	char name[32];
+	size_t len, nlen;
 	struct stat st;
 
 	/* Made in every configuration: System.Native keeps its cross-process
-	 * socket lock file there (pal_socklock_qnx.c). */
-	snprintf(dir, sizeof dir, "/tmp/qnxhost-%u", (unsigned)getuid());
+	 * socket lock file there, and finds it by the same rule
+	 * (pal_socklock_qnx.c). */
+	if (tmp == NULL || tmp[0] == '\0')
+		tmp = "/tmp";
+	len = strlen(tmp);
+	while (len > 1 && tmp[len - 1] == '/')
+		len--;
+	nlen = (size_t)snprintf(name, sizeof name, "qnxhost-%u", (unsigned)getuid());
+	if (len > nlen && tmp[len - nlen - 1] == '/' && strncmp(tmp + len - nlen, name, nlen) == 0)
+		snprintf(dir, sizeof dir, "%.*s", (int)len, tmp);
+	else if (snprintf(dir, sizeof dir, "%.*s/%s", (int)len, tmp, name) >= (int)sizeof dir) {
+		fprintf(stderr, "qnxhost: warning: TMPDIR is too long\n");
+		return;
+	}
 	if (mkdir(dir, 0700) != 0 && errno != EEXIST) {
 		fprintf(stderr, "qnxhost: warning: cannot make %s: %s\n", dir, strerror(errno));
 		return;
@@ -490,10 +510,10 @@ static void private_tmpdir(void)
 		fprintf(stderr, "qnxhost: warning: %s is not a private directory of this user\n", dir);
 		return;
 	}
-	private_dir = dir;
-	if (getenv("TMPDIR") != NULL || (opt != NULL && strcmp(opt, "0") == 0))
-		return;
-	setenv("TMPDIR", dir, 1);
+	if (getenv("TMPDIR") == NULL && (opt == NULL || strcmp(opt, "0") != 0))
+		setenv("TMPDIR", dir, 1);
+	/* Resolved, to compare with realpath's results (the time zones). */
+	private_dir = realpath(dir, NULL);
 }
 
 /* Time zones; see the comment at the top. */
