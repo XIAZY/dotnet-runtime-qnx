@@ -257,6 +257,99 @@ void SystemNative_LowLevelFutex_WakeByAddressSingle(int32_t* address)
 {
     syscall(SYS_futex, address, FUTEX_WAKE_PRIVATE, 1, NULL, NULL, 0);
 }
+#elif defined(__QNXNTO__)
+// QNX has no futex, but the Linux CoreLib QNX runs waits on these, so a no-op
+// would leave its waiters spinning. Waiting on an address is a mutex and
+// condition variable from a small table, chosen by the address: the value is
+// compared with the mutex held, and a waker takes the same mutex before it
+// signals, so no wake is lost. Several addresses share a condition variable,
+// so a wake wakes every waiter on it; callers treat that as a spurious wake.
+#define FUTEX_TABLE_SIZE 64
+
+typedef struct
+{
+    pthread_mutex_t mutex;
+    pthread_cond_t cond;
+} FutexBucket;
+
+static FutexBucket s_futexTable[FUTEX_TABLE_SIZE];
+static pthread_once_t s_futexTableOnce = PTHREAD_ONCE_INIT;
+
+static void InitializeFutexTable(void)
+{
+    pthread_condattr_t condAttr;
+    int error = pthread_condattr_init(&condAttr);
+    assert(error == 0);
+    // Timeouts are measured on the monotonic clock, as Linux's futex measures them.
+    error = pthread_condattr_setclock(&condAttr, CLOCK_MONOTONIC);
+    assert(error == 0);
+
+    for (int i = 0; i < FUTEX_TABLE_SIZE; i++)
+    {
+        error = pthread_mutex_init(&s_futexTable[i].mutex, NULL);
+        assert(error == 0);
+        error = pthread_cond_init(&s_futexTable[i].cond, &condAttr);
+        assert(error == 0);
+    }
+
+    pthread_condattr_destroy(&condAttr);
+    (void)error;
+}
+
+static FutexBucket* GetFutexBucket(int32_t* address)
+{
+    pthread_once(&s_futexTableOnce, InitializeFutexTable);
+    return &s_futexTable[((uintptr_t)address >> 2) % FUTEX_TABLE_SIZE];
+}
+
+void SystemNative_LowLevelFutex_WaitOnAddress(int32_t* address, int32_t comparand)
+{
+    FutexBucket* bucket = GetFutexBucket(address);
+
+    pthread_mutex_lock(&bucket->mutex);
+    if (*(volatile int32_t*)address == comparand)
+    {
+        pthread_cond_wait(&bucket->cond, &bucket->mutex);
+    }
+    pthread_mutex_unlock(&bucket->mutex);
+}
+
+int32_t SystemNative_LowLevelFutex_WaitOnAddressTimeout(int32_t* address, int32_t comparand, int32_t timeoutMilliseconds)
+{
+    assert(timeoutMilliseconds >= 0);
+
+    struct timespec deadline;
+    clock_gettime(CLOCK_MONOTONIC, &deadline);
+    deadline.tv_sec += timeoutMilliseconds / 1000;
+    deadline.tv_nsec += (timeoutMilliseconds % 1000) * 1000 * 1000;
+    if (deadline.tv_nsec >= 1000 * 1000 * 1000)
+    {
+        deadline.tv_sec++;
+        deadline.tv_nsec -= 1000 * 1000 * 1000;
+    }
+
+    FutexBucket* bucket = GetFutexBucket(address);
+    int waitResult = 0;
+
+    pthread_mutex_lock(&bucket->mutex);
+    if (*(volatile int32_t*)address == comparand)
+    {
+        waitResult = pthread_cond_timedwait(&bucket->cond, &bucket->mutex, &deadline);
+    }
+    pthread_mutex_unlock(&bucket->mutex);
+
+    // normal/immediate/spurious wakes are not timeouts
+    return waitResult != ETIMEDOUT;
+}
+
+void SystemNative_LowLevelFutex_WakeByAddressSingle(int32_t* address)
+{
+    FutexBucket* bucket = GetFutexBucket(address);
+
+    pthread_mutex_lock(&bucket->mutex);
+    pthread_cond_broadcast(&bucket->cond);
+    pthread_mutex_unlock(&bucket->mutex);
+}
 #else // defined(TARGET_LINUX)
 
 // On illumos/Solaris libc's assert is not annotated noreturn, so marking these stubs noreturn would
@@ -299,7 +392,7 @@ void SystemNative_LowLevelFutex_WakeByAddressSingle(int32_t* address)
 
 #undef DEBUGNOTRETURN
 
-#endif  // defined(TARGET_LINUX)
+#endif  // defined(TARGET_LINUX), defined(__QNXNTO__)
 
 int32_t SystemNative_CreateThread(uintptr_t stackSize, void *(*startAddress)(void*), void *parameter)
 {
