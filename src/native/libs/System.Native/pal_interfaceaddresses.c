@@ -275,7 +275,7 @@ int32_t SystemNative_EnumerateInterfaceAddresses(void* context,
                         memset(&ifmr, 0, sizeof(ifmr));
                         strncpy(ifmr.ifm_name, actualName, sizeof(ifmr.ifm_name));
 
-                        if ((ioctl(fd, SIOCGIFMEDIA, (caddr_t)&ifmr) == 0) && (IFM_TYPE(ifmr.ifm_current) == IFM_IEEE80211))
+                        if ((ioctl(fd, SIOCGIFMEDIA, (caddr_t)&ifmr) != -1) && (IFM_TYPE(ifmr.ifm_current) == IFM_IEEE80211))
                         {
                             lla.HardwareType = NetworkInterfaceType_Wireless80211;
                         }

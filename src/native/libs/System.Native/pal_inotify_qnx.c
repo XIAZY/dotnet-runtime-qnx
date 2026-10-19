@@ -270,7 +270,7 @@ static void QueueEvent(Instance* inst, int32_t wd, uint32_t mask, uint32_t cooki
 static long PendingBytes(Instance* inst)
 {
     int n;
-    if (ioctl(inst->readFd, FIONREAD, &n) != 0)
+    if (ioctl(inst->readFd, FIONREAD, &n) == -1)
     {
         return -1;
     }
