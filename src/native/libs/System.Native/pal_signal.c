@@ -614,33 +614,37 @@ void SystemNative_SetDelayedSigChildConsoleConfigurationHandler(void (*callback)
 
 static bool CreateSignalHandlerThread(int* readFdPtr)
 {
+    // The pthread functions return their error instead of setting errno;
+    // it is put in errno here, for the caller to report.
     pthread_attr_t attr;
-    if (pthread_attr_init(&attr) != 0)
+    int err = pthread_attr_init(&attr);
+    if (err != 0)
     {
+        errno = err;
         return false;
     }
 
-    bool success = false;
 #ifdef DEBUG
     // Set the thread stack size to 512kB. This is to fix a problem on Alpine
     // Linux where the default secondary thread stack size is just about 85kB
     // and our testing have hit cases when that was not enough in debug
     // and checked builds due to some large frames in JIT code.
-    if (pthread_attr_setstacksize(&attr, 512 * 1024) == 0)
+    err = pthread_attr_setstacksize(&attr, 512 * 1024);
+    if (err == 0)
 #endif
     {
         pthread_t handlerThread;
-        if (pthread_create(&handlerThread, &attr, SignalHandlerLoop, readFdPtr) == 0)
-        {
-            success = true;
-        }
+        err = pthread_create(&handlerThread, &attr, SignalHandlerLoop, readFdPtr);
     }
 
-    int err = errno;
     pthread_attr_destroy(&attr);
-    errno = err;
+    if (err != 0)
+    {
+        errno = err;
+        return false;
+    }
 
-    return success;
+    return true;
 }
 
 int32_t InitializeSignalHandlingCore(void)
