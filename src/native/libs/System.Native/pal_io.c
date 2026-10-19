@@ -702,18 +702,24 @@ int32_t SystemNative_Pipe(int32_t pipeFds[2], int32_t flags)
     if ((flags & PAL_O_CLOEXEC) != 0 && result == 0)
 #endif
     {
+        // F_SETFD returns a value other than -1 on success, not necessarily
+        // 0: QNX returns the descriptor's previous connection flags.
         while ((result = fcntl(pipeFds[0], F_SETFD, FD_CLOEXEC)) < 0 && errno == EINTR);
-        if (result == 0)
+        if (result != -1)
         {
             while ((result = fcntl(pipeFds[1], F_SETFD, FD_CLOEXEC)) < 0 && errno == EINTR);
         }
 
-        if (result != 0)
+        if (result == -1)
         {
             int tmpErrno = errno;
             close(pipeFds[0]);
             close(pipeFds[1]);
             errno = tmpErrno;
+        }
+        else
+        {
+            result = 0;
         }
     }
 #else /* HAVE_PIPE */
