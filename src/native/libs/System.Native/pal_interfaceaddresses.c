@@ -281,7 +281,7 @@ int32_t SystemNative_EnumerateInterfaceAddresses(void* context,
                         memset(&ifmr, 0, sizeof(ifmr));
                         strncpy(ifmr.ifm_name, actualName, sizeof(ifmr.ifm_name));
 
-                        if ((ioctl(fd, SIOCGIFMEDIA, (caddr_t)&ifmr) == 0) && (IFM_TYPE(ifmr.ifm_current) == IFM_IEEE80211))
+                        if ((ioctl(fd, SIOCGIFMEDIA, (caddr_t)&ifmr) != -1) && (IFM_TYPE(ifmr.ifm_current) == IFM_IEEE80211))
                         {
                             lla.HardwareType = NetworkInterfaceType_Wireless80211;
                         }
@@ -487,7 +487,7 @@ int32_t SystemNative_GetNetworkInterfaces(int32_t * interfaceCount, NetworkInter
 
             if (socketfd > -1)
             {
-                if (ioctl(socketfd, SIOCGIFMTU, &ifr) == 0)
+                if (ioctl(socketfd, SIOCGIFMTU, &ifr) != -1)
                 {
                     nii->Mtu = ifr.ifr_mtu;
                 }

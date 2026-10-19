@@ -26,12 +26,13 @@ int32_t SystemNative_GetWindowSize(intptr_t fd, WinSize* windowSize)
 #if HAVE_IOCTL && HAVE_TIOCGWINSZ
     int error = ioctl(ToFileDescriptor(fd), TIOCGWINSZ, windowSize);
 
-    if (error != 0)
+    if (error == -1)
     {
         memset(windowSize, 0, sizeof(WinSize)); // managed out param must be initialized
+        return -1;
     }
 
-    return error;
+    return 0;
 #else
     (void)fd;
     memset(windowSize, 0, sizeof(WinSize)); // managed out param must be initialized
