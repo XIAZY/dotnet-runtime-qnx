@@ -2089,7 +2089,7 @@ int32_t SystemNative_Accept(intptr_t socket, uint8_t* socketAddress, int32_t* so
 #if defined(FD_CLOEXEC)
     // macOS does not have accept4 but it can set _CLOEXEC on descriptor.
     // Unlike accept4 it is not atomic and the fd can leak child process.
-    if ((accepted != -1) && fcntl(accepted, F_SETFD, FD_CLOEXEC) != 0)
+    if ((accepted != -1) && fcntl(accepted, F_SETFD, FD_CLOEXEC) == -1)
     {
         // Preserve and return errno from fcntl. close() may reset errno to OK.
         int oldErrno = errno;

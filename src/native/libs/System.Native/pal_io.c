@@ -763,7 +763,7 @@ int32_t SystemNative_FcntlSetFD(intptr_t fd, int32_t flags)
 {
     int result;
     while ((result = fcntl(ToFileDescriptor(fd), F_SETFD, ConvertOpenFlags(flags))) < 0 && errno == EINTR);
-    return result;
+    return result == -1 ? -1 : 0;
 }
 
 int32_t SystemNative_FcntlGetFD(intptr_t fd)
@@ -825,7 +825,7 @@ int32_t SystemNative_FcntlSetIsNonBlocking(intptr_t fd, int32_t isNonBlocking)
         flags |= O_NONBLOCK;
     }
 
-    return fcntl(fileDescriptor, F_SETFL, flags);
+    return fcntl(fileDescriptor, F_SETFL, flags) == -1 ? -1 : 0;
 }
 
 int32_t SystemNative_FcntlGetIsNonBlocking(intptr_t fd, int32_t* isNonBlocking)
