@@ -252,7 +252,9 @@ shared around the socket control calls (`socket`, `bind`, `listen`,
 `connect` and `accept` on non-blocking descriptors, the option and name
 calls) and `close`, and exclusively around the unlink of a name that `lstat`
 reports as a socket. Under it, an `fcntl` record lock on `socket.lock` in
-`qnxhost-<uid>`, a private directory in `$TMPDIR` (`/tmp` when unset), does
+`qnxhost-<uid>`, a private directory in `$TMPDIR` (`/tmp` when unset; on
+BlackBerry 10, whose `/tmp` holds no directories, the user's cache directory,
+which `qnxhost` then names in `$TMPDIR`), does
 the same between the processes of one user; record locks belong to the
 process, so the first thread to take the shared side takes the read lock and
 the last releases it. A pair of `fcntl` calls costs 16-20 µs. Reads, writes
