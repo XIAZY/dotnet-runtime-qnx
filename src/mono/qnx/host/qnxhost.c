@@ -56,11 +56,16 @@
  *    /tmp when TMPDIR is unset or empty, in every configuration:
  *    System.Native keeps its cross-process socket lock file there and
  *    finds it the same way (pal_socklock_qnx.c). A TMPDIR that already
- *    names such a directory (a parent qnxhost's) is that directory. On
- *    BlackBerry 10, /tmp is /dev/shmem, which holds no directories, and
- *    applications get a TMPDIR of their own. It gives the program that
- *    directory as TMPDIR, unless TMPDIR is set already (by the environment
- *    or the props file) or QNXHOST_PRIVATE_TMPDIR=0.
+ *    names such a directory (a parent qnxhost's) is that directory. It
+ *    gives the program that directory as TMPDIR, unless TMPDIR is set
+ *    already (by the environment or the props file) or
+ *    QNXHOST_PRIVATE_TMPDIR=0. On BlackBerry 10, /tmp is /dev/shmem, which
+ *    holds no directories (applications get a TMPDIR of their own): when
+ *    TMPDIR is unset and /tmp cannot hold the directory, it goes in the
+ *    user's cache directory instead (XDG_CACHE_HOME, else HOME/.cache), and
+ *    TMPDIR leads System.Native and child processes to it. A directory
+ *    given as TMPDIR must leave room in sun_path for .NET's socket names;
+ *    one that does not is not used.
  *    .NET makes the Unix sockets of named pipes in the temporary directory
  *    and deletes them when they close, and on QNX 6.5 unlinking a socket's
  *    name while io-pkt serves another request from any process deadlocks
@@ -103,6 +108,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 #include <unistd.h>
 #include <libgen.h>
 #include <sys/procfs.h>
@@ -538,40 +544,96 @@ static void print_mallinfo(void)
  * it, else NULL. */
 static const char *private_dir;
 
+/* Room a directory must leave in sun_path (104 bytes on QNX 6.5 and
+ * BlackBerry 10) for the socket names .NET makes in TMPDIR: "/CoreFxPipe_"
+ * (PipeStream.Unix.cs), a pipe name of up to 32 characters and the NUL. */
+#define SOCKET_NAME_ROOM (sizeof "/CoreFxPipe_" - 1 + 32 + 1)
+#define SOCKET_DIR_MAX (sizeof ((struct sockaddr_un *)0)->sun_path - SOCKET_NAME_ROOM)
+
+/* Makes the private directory in base into dir, by the rule at the top:
+ * base itself when it already names one, else base/qnxhost-<uid>. When
+ * for_tmpdir, the directory must also leave room for socket names. Returns
+ * 0, or -1 with the reason in why. */
+static int make_private_dir(const char *base, int for_tmpdir, char *dir, size_t size, char *why, size_t whysize)
+{
+	char name[32];
+	size_t len, nlen;
+	struct stat st;
+
+	len = strlen(base);
+	while (len > 1 && base[len - 1] == '/')
+		len--;
+	nlen = (size_t)snprintf(name, sizeof name, "qnxhost-%u", (unsigned)getuid());
+	if (len > nlen && base[len - nlen - 1] == '/' && strncmp(base + len - nlen, name, nlen) == 0)
+		snprintf(dir, size, "%.*s", (int)len, base);
+	else if (snprintf(dir, size, "%.*s/%s", (int)len, base, name) >= (int)size) {
+		snprintf(why, whysize, "TMPDIR is too long");
+		return -1;
+	}
+	if (for_tmpdir && strlen(dir) > SOCKET_DIR_MAX) {
+		snprintf(why, whysize, "%s is too long for socket names", dir);
+		return -1;
+	}
+	if (mkdir(dir, 0700) != 0 && errno != EEXIST) {
+		snprintf(why, whysize, "cannot make %s: %s", dir, strerror(errno));
+		return -1;
+	}
+	if (lstat(dir, &st) != 0 || !S_ISDIR(st.st_mode) || st.st_uid != getuid() || (st.st_mode & 077) != 0) {
+		snprintf(why, whysize, "%s is not a private directory of this user", dir);
+		return -1;
+	}
+	return 0;
+}
+
+/* The user's cache directory, made if missing: XDG_CACHE_HOME when it is an
+ * absolute path, else HOME/.cache. Returns NULL when there is none. */
+static const char *cache_dir(char *buf, size_t size)
+{
+	const char *xdg = getenv("XDG_CACHE_HOME");
+	const char *home = getenv("HOME");
+
+	if (xdg != NULL && xdg[0] == '/') {
+		if (snprintf(buf, size, "%s", xdg) >= (int)size)
+			return NULL;
+	} else if (home != NULL && home[0] == '/') {
+		if (snprintf(buf, size, "%s/.cache", home) >= (int)size)
+			return NULL;
+	} else
+		return NULL;
+	if (mkdir(buf, 0700) != 0 && errno != EEXIST)
+		return NULL;
+	return buf;
+}
+
 /* Sets TMPDIR to the private directory; see the comment at the top. */
 static void private_tmpdir(void)
 {
 	const char *opt = getenv("QNXHOST_PRIVATE_TMPDIR");
 	const char *tmp = getenv("TMPDIR");
+	int set_tmpdir = tmp == NULL && (opt == NULL || strcmp(opt, "0") != 0);
 	static char dir[PATH_MAX];
-	char name[32];
-	size_t len, nlen;
-	struct stat st;
+	char why[PATH_MAX + 64], cache_why[PATH_MAX + 64], cache[PATH_MAX];
+	const char *base = NULL;
 
 	/* Made in every configuration: System.Native keeps its cross-process
 	 * socket lock file there, and finds it by the same rule
 	 * (pal_socklock_qnx.c). */
 	if (tmp == NULL || tmp[0] == '\0')
 		tmp = "/tmp";
-	len = strlen(tmp);
-	while (len > 1 && tmp[len - 1] == '/')
-		len--;
-	nlen = (size_t)snprintf(name, sizeof name, "qnxhost-%u", (unsigned)getuid());
-	if (len > nlen && tmp[len - nlen - 1] == '/' && strncmp(tmp + len - nlen, name, nlen) == 0)
-		snprintf(dir, sizeof dir, "%.*s", (int)len, tmp);
-	else if (snprintf(dir, sizeof dir, "%.*s/%s", (int)len, tmp, name) >= (int)sizeof dir) {
-		fprintf(stderr, "qnxhost: warning: TMPDIR is too long\n");
-		return;
+	if (make_private_dir(tmp, set_tmpdir, dir, sizeof dir, why, sizeof why) != 0) {
+		/* /tmp could not hold it (on BlackBerry 10, /tmp is /dev/shmem,
+		 * which holds no directories): when the launcher sets TMPDIR,
+		 * the user's cache directory is the other place, since
+		 * System.Native and child processes follow TMPDIR to it. */
+		if (!set_tmpdir || (base = cache_dir(cache, sizeof cache)) == NULL ||
+		    make_private_dir(base, 1, dir, sizeof dir, cache_why, sizeof cache_why) != 0) {
+			fprintf(stderr, "qnxhost: warning: %s\n", why);
+			if (set_tmpdir && base != NULL)
+				fprintf(stderr, "qnxhost: warning: %s\n", cache_why);
+			return;
+		}
 	}
-	if (mkdir(dir, 0700) != 0 && errno != EEXIST) {
-		fprintf(stderr, "qnxhost: warning: cannot make %s: %s\n", dir, strerror(errno));
-		return;
-	}
-	if (lstat(dir, &st) != 0 || !S_ISDIR(st.st_mode) || st.st_uid != getuid() || (st.st_mode & 077) != 0) {
-		fprintf(stderr, "qnxhost: warning: %s is not a private directory of this user\n", dir);
-		return;
-	}
-	if (getenv("TMPDIR") == NULL && (opt == NULL || strcmp(opt, "0") != 0))
+	if (set_tmpdir)
 		setenv("TMPDIR", dir, 1);
 	/* Resolved, to compare with realpath's results (the time zones). */
 	private_dir = realpath(dir, NULL);
