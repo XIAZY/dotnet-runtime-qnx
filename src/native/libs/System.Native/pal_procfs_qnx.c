@@ -30,6 +30,7 @@
 // sysconf(_SC_CLK_TCK) ticks, as Linux does.
 
 #include "pal_config.h"
+#include <pal_qnx_touch.h>
 
 #if defined(__QNXNTO__)
 
@@ -198,6 +199,7 @@ static procfs_mapinfo* QnxReadMaps(int as, int dcmd, int* count)
 {
     int n = 0;
     *count = 0;
+    QnxTouchToWrite(&n, sizeof(n));
     if (devctl(as, dcmd, NULL, 0, &n) != EOK || n <= 0)
         return NULL;
     n += 16; // it may grow meanwhile
@@ -205,6 +207,8 @@ static procfs_mapinfo* QnxReadMaps(int as, int dcmd, int* count)
     if (maps == NULL)
         return NULL;
     int got = 0;
+    // calloc may return fresh zero pages without writing them.
+    QnxTouchToWrite(maps, (size_t)n * sizeof(procfs_mapinfo));
     if (devctl(as, dcmd, maps, (size_t)n * sizeof(procfs_mapinfo), &got) != EOK)
     {
         free(maps);
@@ -246,6 +250,7 @@ static int QnxReadProcess(pid_t pid, QnxProcess* process, int* asOut)
     int as = open(path, O_RDONLY | O_CLOEXEC);
     if (as < 0)
         return -1; // errno: ENOENT for a process that does not exist
+    QnxTouchToWrite(&process->info, sizeof(process->info));
     int err = devctl(as, DCMD_PROC_INFO, &process->info, sizeof(process->info), NULL);
     if (err != EOK)
     {
@@ -379,9 +384,15 @@ static bool QnxMappedPath(int as, unsigned dcmd, uint64_t vaddr, bool self, char
         // A program started by a relative path is reported as it was given
         // ("./bin/qnxhost"), which only resolves in the process's own
         // directory: resolve it for this process, leave it for others.
-        char* resolved = self ? realpath(map.info.path, NULL) : NULL;
+        // realpath into a buffer of our own, touched first (pal_qnx_touch.h).
+        char resolvedBuf[PATH_MAX];
+        char* resolved = NULL;
+        if (self)
+        {
+            QnxTouchToWrite(resolvedBuf, sizeof(resolvedBuf));
+            resolved = realpath(map.info.path, resolvedBuf);
+        }
         snprintf(out, size, "%s", resolved != NULL ? resolved : map.info.path);
-        free(resolved);
         return true;
     }
     snprintf(out, size, "%s%s", map.info.path[0] == '/' ? "" : "/", map.info.path);
@@ -403,6 +414,7 @@ static void QnxRenderMaps(int as, bool self, QnxText* text)
     int count;
     char exe[1100];
     struct stat exeStat;
+    QnxTouchToWrite(&exeStat, sizeof(exeStat));
     bool haveExe =
         QnxMappedPath(as, DCMD_PROC_MAPDEBUG_BASE, 0, self, exe, sizeof(exe)) && stat(exe, &exeStat) == 0;
     procfs_mapinfo* maps = QnxReadMaps(as, DCMD_PROC_MAPINFO, &count);
