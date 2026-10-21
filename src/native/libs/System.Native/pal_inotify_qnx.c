@@ -168,6 +168,7 @@ static bool ScanDirectory(const char* path, Entry** entriesOut, size_t* countOut
         memcpy(full + pathLen + 1, de->d_name, nameLen + 1);
 
         struct stat st;
+        QnxTouchToWrite(&st, sizeof(st));
         int r = lstat(full, &st);
         free(full);
         if (r != 0)
@@ -321,6 +322,7 @@ static bool FlushQueue(Instance* inst)
 static bool ReaderAlive(Instance* inst)
 {
     struct stat st;
+    QnxTouchToWrite(&st, sizeof(st));
     return fstat(inst->readFd, &st) == 0 && st.st_dev == inst->pipeDev && st.st_ino == inst->pipeIno;
 }
 
@@ -381,6 +383,7 @@ static void ScanSnapshots(Snapshot* snaps, size_t n)
         {
             continue; // skipped this tick (wd -1: matches no watch)
         }
+        QnxTouchToWrite(&st, sizeof(st));
         snaps[k].ok = stat(snaps[k].path, &st) == 0 && st.st_ino == snaps[k].ino && st.st_dev == snaps[k].dev &&
                       ScanDirectory(snaps[k].path, &snaps[k].entries, &snaps[k].count);
     }
@@ -673,6 +676,7 @@ intptr_t QnxINotifyInit(void)
 
     struct stat st;
     Instance* inst = calloc(1, sizeof(Instance));
+    QnxTouchToWrite(&st, sizeof(st));
     if (inst == NULL || fstat(fds[0], &st) != 0)
     {
         free(inst);
@@ -712,6 +716,7 @@ intptr_t QnxINotifyInit(void)
 int32_t QnxINotifyAddWatch(intptr_t fd, const char* pathName, uint32_t mask)
 {
     struct stat st;
+    QnxTouchToWrite(&st, sizeof(st));
     int r = (mask & PAL_IN_DONT_FOLLOW) ? lstat(pathName, &st) : stat(pathName, &st);
     if (r != 0)
     {

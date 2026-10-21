@@ -4,6 +4,7 @@
 #include "pal_config.h"
 #include "pal_console.h"
 #include "pal_utilities.h"
+#include <pal_qnx_touch.h>
 #include "pal_signal.h"
 
 #include <assert.h>
@@ -388,6 +389,7 @@ int32_t SystemNative_ReadStdin(void* buffer, int32_t bufferSize)
     }
 
     ssize_t count;
+    QnxTouchToWrite(buffer, Int32ToSizeT(bufferSize));
     while (CheckInterrupted(count = read(STDIN_FILENO, buffer, Int32ToSizeT(bufferSize))));
     return (int32_t)count;
 }
