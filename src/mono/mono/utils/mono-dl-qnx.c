@@ -131,6 +131,37 @@ refuse (const char *path, const char *reason, int fd, uint8_t *base, size_t span
 }
 
 /*
+ * QNX 6.5 can freeze as a whole when a resource manager copies a reply into a
+ * page of the caller that has not been touched yet while a page-in for the
+ * same process waits on that manager (QNX SDP 6.5.0 release notes, Ref#
+ * 62483). The loader's reads go into stack buffers, and the runtime runs on a
+ * lazy stack, so their pages may be untouched: each is touched first. Only
+ * bytes inside the buffer are accessed (the first, the first of each page
+ * that starts inside, the last), through volatile accesses so that they stay.
+ * System.Native's pal_qnx_touch.h does the same for its calls.
+ */
+static void
+touch_to_write (void *buf, size_t len)
+{
+	volatile char *first = (volatile char *)buf;
+	volatile char *last;
+	uintptr_t end, p;
+
+	if (buf == NULL || len == 0)
+		return;
+	last = first + (len - 1);
+	end = (uintptr_t)last;
+	*first = *first;
+	for (p = ((uintptr_t)first | (uintptr_t)(QNX_PAGE - 1)) + 1; p != 0 && p <= end; p += QNX_PAGE) {
+		volatile char *q = (volatile char *)p;
+		*q = *q;
+		if (end - p < QNX_PAGE)
+			break;
+	}
+	*last = *last;
+}
+
+/*
  * BlackBerry 10's QNX maps and dlopens a file written into the inode of a
  * deleted file that was mapped or executed with the deleted file's cached
  * pages, while read() returns the new contents (measured; an image replaced
@@ -152,12 +183,14 @@ invalidate_if_stale (int fd)
 	uint8_t *p;
 	size_t n;
 
+	touch_to_write (&st, sizeof (st));
 	if (fstat (fd, &st) != 0 || st.st_size <= 0)
 		return;
 	p = (uint8_t *)mmap (NULL, (size_t)st.st_size, PROT_READ, MAP_SHARED | MAP_LAZY, fd, 0);
 	if (p == MAP_FAILED)
 		return;
 	n = st.st_size < QNX_PAGE ? (size_t)st.st_size : QNX_PAGE;
+	touch_to_write (head, n);
 	if (pread (fd, head, n, 0) != (ssize_t)n || memcmp (p, head, n) != 0)
 		msync (p, (size_t)st.st_size, MS_INVALIDATE);
 	munmap (p, (size_t)st.st_size);
@@ -184,13 +217,16 @@ mono_qnx_image_open (const char *path)
 		return NULL; /* dlopen reports the error */
 	invalidate_if_stale (fd);
 
+	touch_to_write (&vfs, sizeof (vfs));
 	if (fstatvfs (fd, &vfs) == 0 && (vfs.f_flag & ST_NOEXEC))
 		return refuse (path, "on a filesystem mounted without execute permission", fd, NULL, 0);
 
+	touch_to_write (&eh, sizeof (eh));
 	if (pread (fd, &eh, sizeof (eh), 0) != sizeof (eh) || memcmp (eh.e_ident, "\177ELF\1\1", 6) != 0 ||
 	    eh.e_type != QNX_ET_DYN || eh.e_machine != QNX_EM_HOST || eh.e_phentsize != sizeof (QnxElfPhdr) ||
 	    eh.e_phnum == 0 || eh.e_phnum > G_N_ELEMENTS (ph))
 		return refuse (path, "not a 32-bit " QNX_HOST_NAME " shared object of the expected shape", fd, NULL, 0);
+	touch_to_write (ph, eh.e_phnum * sizeof (QnxElfPhdr));
 	if (pread (fd, ph, eh.e_phnum * sizeof (QnxElfPhdr), eh.e_phoff) != (ssize_t)(eh.e_phnum * sizeof (QnxElfPhdr)))
 		return refuse (path, "short program header table", fd, NULL, 0);
 
