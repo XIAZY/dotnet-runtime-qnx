@@ -8,6 +8,7 @@
 #include <poll.h>
 #include <pal_error_common.h>
 #include <pal_utilities.h>
+#include <pal_qnx_touch.h>
 
 /**
  * Our intermediate pollfd struct to normalize the data types
@@ -45,6 +46,7 @@ inline static int32_t Common_Read(intptr_t fd, void* buffer, int32_t bufferSize)
     }
 
     ssize_t count;
+    QnxTouchToWrite(buffer, (size_t)bufferSize);
     while ((count = read(ToFileDescriptor(fd), buffer, (uint32_t)bufferSize)) < 0 && errno == EINTR);
 
     assert(count >= -1 && count <= bufferSize);
@@ -63,6 +65,7 @@ inline static int32_t Common_Write(intptr_t fd, const void* buffer, int32_t buff
     }
 
     ssize_t count;
+    QnxTouchToRead(buffer, (size_t)bufferSize);
     while ((count = write(ToFileDescriptor(fd), buffer, (uint32_t)bufferSize)) < 0 && errno == EINTR);
 
     assert(count >= -1 && count <= bufferSize);

@@ -271,6 +271,7 @@ int32_t SystemNative_Stat(const char* path, FileStatus* output)
         return -1;
     }
 #endif
+    QnxTouchToWrite(&result, sizeof(result));
     while ((ret = stat_(path, &result)) < 0 && errno == EINTR);
 
     if (ret == 0)
@@ -285,6 +286,7 @@ int32_t SystemNative_FStat(intptr_t fd, FileStatus* output)
 {
     struct stat_ result;
     int ret;
+    QnxTouchToWrite(&result, sizeof(result));
     while ((ret = fstat_(ToFileDescriptor(fd), &result)) < 0 && errno == EINTR);
 
     if (ret == 0)
@@ -311,6 +313,7 @@ int32_t SystemNative_LStat(const char* path, FileStatus* output)
         return -1;
     }
 #endif
+    QnxTouchToWrite(&result, sizeof(result));
     ret = lstat_(path, &result);
 
     if (ret == 0)
@@ -413,6 +416,7 @@ intptr_t SystemNative_Open(const char* path, int32_t flags, int32_t mode)
     if (result >= 0 && (original_flags & PAL_O_NOFOLLOW))
     {
         struct stat linkStat;
+        QnxTouchToWrite(&linkStat, sizeof(linkStat));
         if (lstat(path, &linkStat) == 0 && S_ISLNK(linkStat.st_mode))
         {
             close(result);
@@ -1324,6 +1328,7 @@ int32_t SystemNative_FTruncate(intptr_t fd, int64_t length)
     if (result < 0 && errno == ENOSYS)
     {
         struct stat st;
+        QnxTouchToWrite(&st, sizeof(st));
         if (fstat(ToFileDescriptor(fd), &st) == 0 && !S_ISREG(st.st_mode))
         {
             errno = EINVAL;
@@ -1496,6 +1501,7 @@ int32_t SystemNative_ReadLink(const char* path, char* buffer, int32_t bufferSize
         return emulated;
     }
 #endif
+    QnxTouchToWrite(buffer, (size_t)bufferSize);
     ssize_t count = readlink(path, buffer, (size_t)bufferSize);
     assert(count >= -1 && count <= bufferSize);
 
@@ -1550,6 +1556,7 @@ static int32_t CopyFile_ReadWrite(int inFd, int outFd)
     {
         // Read up to what will fit in our buffer.  We're done if we get back 0 bytes.
         ssize_t bytesRead;
+        QnxTouchToWrite(buffer, BufferLength);
         while ((bytesRead = read(inFd, buffer, BufferLength)) < 0 && errno == EINTR);
         if (bytesRead == -1)
         {
@@ -1724,6 +1731,7 @@ int32_t SystemNative_CopyFile(intptr_t sourceFd, intptr_t destinationFd, int64_t
 
     // Copy file times.
     struct stat_ sourceStat;
+    QnxTouchToWrite(&sourceStat, sizeof(sourceStat));
     while ((ret = fstat_(inFd, &sourceStat)) < 0 && errno == EINTR);
     if (ret == 0)
     {
@@ -1862,7 +1870,25 @@ int32_t SystemNative_GetPeerID(intptr_t socket, uid_t* euid)
 char* SystemNative_RealPath(const char* path)
 {
     assert(path != NULL);
-#if !defined(TARGET_WASI)
+#if defined(__QNXNTO__)
+    // realpath(path, NULL) would fill a buffer libc allocates, which cannot be
+    // touched first (see pal_qnx_touch.h); one of our own, of PATH_MAX bytes as
+    // realpath requires, is returned instead and freed the same way.
+    char* resolved = (char*)malloc(PATH_MAX);
+    if (resolved == NULL)
+    {
+        return NULL;
+    }
+    QnxTouchToWrite(resolved, PATH_MAX);
+    if (realpath(path, resolved) == NULL)
+    {
+        int err = errno;
+        free(resolved);
+        errno = err;
+        return NULL;
+    }
+    return resolved;
+#elif !defined(TARGET_WASI)
     return realpath(path, NULL);
 #else /* TARGET_WASI */
     return NULL;
@@ -1932,6 +1958,7 @@ uint32_t SystemNative_FileSystemSupportsLocking(intptr_t fd, int32_t lockOperati
     struct statfs statfsArgs;
     // for our needs (get file system type) statfs is always enough and there is no need to use statfs64
     // which got deprecated in macOS 10.6, in favor of statfs
+    QnxTouchToWrite(&statfsArgs, sizeof(statfsArgs));
     while ((statfsRes = fstatfs(ToFileDescriptor(fd), &statfsArgs)) == -1 && errno == EINTR) ;
     if (statfsRes == -1) return 0;
 
@@ -1951,6 +1978,7 @@ uint32_t SystemNative_FileSystemSupportsLocking(intptr_t fd, int32_t lockOperati
 #elif HAVE_STATVFS_BASETYPE
     int statfsRes;
     struct statvfs statfsArgs;
+    QnxTouchToWrite(&statfsArgs, sizeof(statfsArgs));
     while ((statfsRes = fstatvfs(ToFileDescriptor(fd), &statfsArgs)) == -1 && errno == EINTR) ;
     if (statfsRes == -1) return 0;
 
@@ -2144,6 +2172,7 @@ int32_t SystemNative_PRead(intptr_t fd, void* buffer, int32_t bufferSize, int64_
     assert(bufferSize >= 0);
 
     ssize_t count;
+    QnxTouchToWrite(buffer, (size_t)bufferSize);
     while ((count = pread(ToFileDescriptor(fd), buffer, (uint32_t)bufferSize, (off_t)fileOffset)) < 0 && errno == EINTR);
 
     assert(count >= -1 && count <= bufferSize);
@@ -2156,6 +2185,7 @@ int32_t SystemNative_PWrite(intptr_t fd, void* buffer, int32_t bufferSize, int64
     assert(bufferSize >= 0);
 
     ssize_t count;
+    QnxTouchToRead(buffer, (size_t)bufferSize);
     while ((count = pwrite(ToFileDescriptor(fd), buffer, (uint32_t)bufferSize, (off_t)fileOffset)) < 0 && errno == EINTR);
 
     assert(count >= -1 && count <= bufferSize);
@@ -2218,6 +2248,7 @@ int64_t SystemNative_ReadV(intptr_t fd, IOVector* vectors, int32_t vectorCount)
     while (1)
     {
         int64_t count;
+        QnxTouchIovToWrite((struct iovec*)vectors, allowedVectorCount);
         while ((count = readv(fileDescriptor, (struct iovec*)vectors, allowedVectorCount)) < 0 && errno == EINTR);
 
         if (count != -1 || (errno != EAGAIN && errno != EWOULDBLOCK))
@@ -2255,12 +2286,14 @@ int64_t SystemNative_PReadV(intptr_t fd, IOVector* vectors, int32_t vectorCount,
     int fileDescriptor = ToFileDescriptor(fd);
 #if HAVE_PREADV && !defined(TARGET_WASM) // preadv is buggy on WASM
     int allowedVectorCount = GetAllowedVectorCount(vectors, vectorCount);
+    QnxTouchIovToWrite((struct iovec*)vectors, allowedVectorCount);
     while ((count = preadv(fileDescriptor, (struct iovec*)vectors, allowedVectorCount, (off_t)fileOffset)) < 0 && errno == EINTR);
 #else
     int64_t current;
     for (int i = 0; i < vectorCount; i++)
     {
         IOVector vector = vectors[i];
+        QnxTouchToWrite(vector.Base, vector.Count);
         while ((current = pread(fileDescriptor, vector.Base, vector.Count, (off_t)(fileOffset + count))) < 0 && errno == EINTR);
 
         if (current < 0)
@@ -2298,6 +2331,7 @@ int64_t SystemNative_WriteV(intptr_t fd, IOVector* vectors, int32_t vectorCount)
     while (1)
     {
         int64_t count;
+        QnxTouchIovToRead((struct iovec*)vectors, allowedVectorCount);
         while ((count = writev(fileDescriptor, (struct iovec*)vectors, allowedVectorCount)) < 0 && errno == EINTR);
 
         if (count != -1 || (errno != EAGAIN && errno != EWOULDBLOCK))
@@ -2336,12 +2370,14 @@ int64_t SystemNative_PWriteV(intptr_t fd, IOVector* vectors, int32_t vectorCount
     int fileDescriptor = ToFileDescriptor(fd);
 #if HAVE_PWRITEV && !defined(TARGET_WASM) // pwritev is buggy on WASM
     int allowedVectorCount = GetAllowedVectorCount(vectors, vectorCount);
+    QnxTouchIovToRead((struct iovec*)vectors, allowedVectorCount);
     while ((count = pwritev(fileDescriptor, (struct iovec*)vectors, allowedVectorCount, (off_t)fileOffset)) < 0 && errno == EINTR);
 #else
     int64_t current;
     for (int i = 0; i < vectorCount; i++)
     {
         IOVector vector = vectors[i];
+        QnxTouchToRead(vector.Base, vector.Count);
         while ((current = pwrite(fileDescriptor, vector.Base, vector.Count, (off_t)(fileOffset + count))) < 0 && errno == EINTR);
 
         if (current < 0)

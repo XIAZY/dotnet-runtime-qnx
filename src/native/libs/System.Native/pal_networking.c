@@ -99,16 +99,34 @@ extern int getdomainname(char *name, int namelen);
 #include <sys/iomgr.h>
 #include <sys/neutrino.h>
 #include "pal_socklock_qnx.h"
+// io-pkt writes these calls' results (an address, an option value, and its
+// length) into caller memory; touched first, as for reads (pal_qnx_touch.h).
+// The comma operator in the macros below sequences the touch before the call.
+static inline void QnxTouchSockOut(void* value, socklen_t* length)
+{
+    if (length != NULL)
+    {
+        QnxTouchToWrite(length, sizeof(*length));
+        if (value != NULL)
+        {
+            QnxTouchToWrite(value, (size_t)*length);
+        }
+    }
+}
 #define socket(...) QNX_SOCKET_LOCKED(int, socket(__VA_ARGS__))
 #define socketpair(...) QNX_SOCKET_LOCKED(int, socketpair(__VA_ARGS__))
 #define bind(...) QNX_SOCKET_LOCKED(int, bind(__VA_ARGS__))
 #define listen(...) QNX_SOCKET_LOCKED(int, listen(__VA_ARGS__))
 #define shutdown(...) QNX_SOCKET_LOCKED(int, shutdown(__VA_ARGS__))
 #define setsockopt(...) QNX_SOCKET_LOCKED(int, setsockopt(__VA_ARGS__))
-#define getsockopt(...) QNX_SOCKET_LOCKED(int, getsockopt(__VA_ARGS__))
-#define getsockname(...) QNX_SOCKET_LOCKED(int, getsockname(__VA_ARGS__))
-#define getpeername(...) QNX_SOCKET_LOCKED(int, getpeername(__VA_ARGS__))
-#define accept(fd, ...) QNX_SOCKET_LOCKED_IF_NONBLOCKING(int, fd, accept(fd, __VA_ARGS__))
+#define getsockopt(fd, level, name, value, length) \
+    ((void)QnxTouchSockOut((value), (length)), QNX_SOCKET_LOCKED(int, getsockopt(fd, level, name, value, length)))
+#define getsockname(fd, address, length) \
+    ((void)QnxTouchSockOut((address), (length)), QNX_SOCKET_LOCKED(int, getsockname(fd, address, length)))
+#define getpeername(fd, address, length) \
+    ((void)QnxTouchSockOut((address), (length)), QNX_SOCKET_LOCKED(int, getpeername(fd, address, length)))
+#define accept(fd, address, length) \
+    ((void)QnxTouchSockOut((address), (length)), QNX_SOCKET_LOCKED_IF_NONBLOCKING(int, fd, accept(fd, address, length)))
 #define connect(fd, ...) QNX_SOCKET_LOCKED_IF_NONBLOCKING(int, fd, connect(fd, __VA_ARGS__))
 #endif
 
@@ -1565,6 +1583,27 @@ static int32_t ConvertSocketFlagsPlatformToPal(int platformFlags)
 }
 #endif // CMSG_SPACE
 
+#if defined(__QNXNTO__)
+// The parts of a message header the stack writes into (receive) or reads
+// from (send); see pal_qnx_touch.h.
+static void QnxTouchMsgToWrite(const struct msghdr* header)
+{
+    QnxTouchToWrite(header->msg_name, (size_t)header->msg_namelen);
+    QnxTouchIovToWrite(header->msg_iov, (int)header->msg_iovlen);
+    QnxTouchToWrite(header->msg_control, (size_t)header->msg_controllen);
+}
+
+static void QnxTouchMsgToRead(const struct msghdr* header)
+{
+    QnxTouchToRead(header->msg_name, (size_t)header->msg_namelen);
+    QnxTouchIovToRead(header->msg_iov, (int)header->msg_iovlen);
+    QnxTouchToRead(header->msg_control, (size_t)header->msg_controllen);
+}
+#else
+#define QnxTouchMsgToWrite(header) ((void)0)
+#define QnxTouchMsgToRead(header) ((void)0)
+#endif
+
 int32_t SystemNative_Receive(intptr_t socket, void* buffer, int32_t bufferLen, int32_t flags, int32_t* received)
 {
     if (buffer == NULL || bufferLen < 0 || received == NULL)
@@ -1581,6 +1620,7 @@ int32_t SystemNative_Receive(intptr_t socket, void* buffer, int32_t bufferLen, i
     }
 
     ssize_t res;
+    QnxTouchToWrite(buffer, (size_t)bufferLen);
     while ((res = recv(fd, buffer, (size_t)bufferLen, socketFlags)) < 0 && errno == EINTR);
 
     if (res != -1)
@@ -1668,11 +1708,14 @@ int32_t SystemNative_ReceiveMessage(intptr_t socket, MessageHeader* messageHeade
 #if !defined(CMSG_SPACE)
     // we will only use 0th buffer
     struct iovec* msg_iov = (struct iovec*)messageHeader->IOVectors;
+    QnxTouchToWrite(msg_iov[0].iov_base, msg_iov[0].iov_len);
+    QnxTouchToWrite(messageHeader->SocketAddress, (size_t)messageHeader->SocketAddressLen);
     while ((res = recvfrom(fd, msg_iov[0].iov_base, msg_iov[0].iov_len, socketFlags, (sockaddr *)messageHeader->SocketAddress, (socklen_t*) &(messageHeader->SocketAddressLen))) < 0 && errno == EINTR);
 #else // CMSG_SPACE
     struct msghdr header;
     ConvertMessageHeaderToMsghdr(&header, messageHeader, fd);
 
+    QnxTouchMsgToWrite(&header);
     while ((res = recvmsg(fd, &header, socketFlags)) < 0 && errno == EINTR);
 
     assert(header.msg_name == messageHeader->SocketAddress); // should still be the same location as set in ConvertMessageHeaderToMsghdr
@@ -1743,6 +1786,7 @@ int32_t SystemNative_Send(intptr_t socket, void* buffer, int32_t bufferLen, int3
     int maxProtoRetry = 4;
     while ((res = send(fd, buffer, (size_t)bufferLen, socketFlags)) < 0 && (errno == EINTR || (errno == EPROTOTYPE && --maxProtoRetry > 0)));
 #else
+    QnxTouchToRead(buffer, (size_t)bufferLen);
     while ((res = send(fd, buffer, (size_t)bufferLen, socketFlags)) < 0 && errno == EINTR);
 #endif
     if (res != -1)
@@ -2044,6 +2088,7 @@ int32_t SystemNative_SendMessage(intptr_t socket, MessageHeader* messageHeader, 
     int maxProtoRetry = 4;
     while ((res = sendmsg(fd, &header, socketFlags)) < 0 && (errno == EINTR || (errno == EPROTOTYPE && --maxProtoRetry > 0)));
 #else
+    QnxTouchMsgToRead(&header);
     while ((res = sendmsg(fd, &header, socketFlags)) < 0 && errno == EINTR);
 #endif
 #if defined(__QNXNTO__)
@@ -2074,6 +2119,8 @@ int32_t SystemNative_SendMessage(intptr_t socket, MessageHeader* messageHeader, 
 #else // CMSG_SPACE
     // we will only use 0th buffer
     struct iovec* msg_iov = (struct iovec*)messageHeader->IOVectors;
+    QnxTouchToRead(msg_iov[0].iov_base, msg_iov[0].iov_len);
+    QnxTouchToRead(messageHeader->SocketAddress, (size_t)messageHeader->SocketAddressLen);
     while ((res = sendto(fd, msg_iov[0].iov_base, msg_iov[0].iov_len, socketFlags, (sockaddr *)messageHeader->SocketAddress, (socklen_t)messageHeader->SocketAddressLen)) < 0 && errno == EINTR);
 #endif // CMSG_SPACE
 
@@ -4621,6 +4668,7 @@ int32_t SystemNative_SendFile(intptr_t out_fd, intptr_t in_fd, int64_t offset, i
 
         // Read up to what will fit in our buffer.  We're done if we get back 0 bytes or read 'count' bytes
         ssize_t bytesRead;
+        QnxTouchToWrite(buffer, numBytesToRead);
         while ((bytesRead = read(infd, buffer, numBytesToRead)) < 0 && errno == EINTR);
         if (bytesRead == -1)
         {

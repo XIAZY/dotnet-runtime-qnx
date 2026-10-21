@@ -38,6 +38,7 @@
 // (sshd) are not covered.
 
 #include "pal_config.h"
+#include <pal_qnx_touch.h>
 #include "pal_socklock_qnx.h"
 
 #include <fcntl.h>
@@ -85,6 +86,7 @@ static void QnxOpenLockFile(void)
         fprintf(stderr, "System.Native: TMPDIR is too long; socket names are locked within this process only\n");
         return;
     }
+    QnxTouchToWrite(&st, sizeof(st));
     if (lstat(dir, &st) != 0 || !S_ISDIR(st.st_mode) || st.st_uid != getuid() || (st.st_mode & 077) != 0)
     {
         fprintf(stderr, "System.Native: no private directory %s; socket names are locked within this process only\n", dir);
@@ -178,6 +180,7 @@ int QnxUnlink(const char* path)
 
     // Looking up a socket's name is a request to io-pkt too.
     QnxSocketLockShared();
+    QnxTouchToWrite(&st, sizeof(st));
     int isSocket = lstat(path, &st) == 0 && S_ISSOCK(st.st_mode);
     QnxSocketUnlockShared();
     if (!isSocket)

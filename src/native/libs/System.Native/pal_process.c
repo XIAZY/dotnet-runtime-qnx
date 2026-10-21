@@ -132,6 +132,7 @@ static ssize_t ReadSize(int fd, void* buffer, size_t count)
     while (count > 0)
     {
         ssize_t result = 0;
+        QnxTouchToWrite(buffer, count);
         while (CheckInterrupted(result = read(fd, buffer, count)));
         if (result > 0)
         {
@@ -1337,6 +1338,7 @@ char* SystemNative_GetCwd(char* buffer, int32_t bufferSize)
         return NULL;
     }
 
+    QnxTouchToWrite(buffer, Int32ToSizeT(bufferSize));
     return getcwd(buffer, Int32ToSizeT(bufferSize));
 }
 
