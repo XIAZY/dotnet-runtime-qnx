@@ -147,6 +147,34 @@ static void fail(const char *what, const char *detail)
 	exit(2);
 }
 
+/* QNX 6.5 can freeze as a whole when a resource manager copies a reply into a
+ * page of the caller that has not been touched yet while a page-in for the
+ * same process waits on that manager (QNX SDP 6.5.0 release notes, Ref#
+ * 62483). The buffers of the launcher's stat and read calls are touched first:
+ * a volatile load and store of the first byte, the first byte of each page
+ * that starts inside, and the last, and nothing outside the buffer. The same
+ * as System.Native's pal_qnx_touch.h and the AOT loader's. */
+static void touch_to_write(void *buf, size_t len)
+{
+	volatile char *first = (volatile char *)buf;
+	volatile char *last;
+	uintptr_t end, p;
+	size_t page = 4096;
+
+	if (buf == NULL || len == 0)
+		return;
+	last = first + (len - 1);
+	end = (uintptr_t)last;
+	*first = *first;
+	for (p = ((uintptr_t)first | (uintptr_t)(page - 1)) + 1; p != 0 && p <= end; p += page) {
+		volatile char *q = (volatile char *)p;
+		*q = *q;
+		if (end - p < page)
+			break;
+	}
+	*last = *last;
+}
+
 /* Replaces each "$ROOT" in value with root; the result is malloc'ed. */
 static char *expand(const char *value, const char *root)
 {
@@ -177,6 +205,7 @@ static void read_props(const char *path)
 	char root[PATH_MAX], line[65536];
 	FILE *f;
 
+	touch_to_write(root, sizeof root);
 	if (realpath(path, root) == NULL)
 		fail("cannot find", path);
 	*strrchr(root, '/') = '\0';
@@ -281,6 +310,7 @@ static ssize_t qnx_readlink(const char *path, char *buf, size_t size)
 		free(self);
 		return (ssize_t)n;
 	}
+	touch_to_write(buf, size);
 	return readlink(path, buf, size);
 }
 
@@ -453,6 +483,7 @@ static void invalidate_file(const char *path)
 
 	if (fd < 0)
 		return;
+	touch_to_write(&st, sizeof st);
 	if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0 &&
 	    (p = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_SHARED, fd, 0)) != MAP_FAILED) {
 		msync(p, (size_t)st.st_size, MS_INVALIDATE);
@@ -582,6 +613,7 @@ static int make_private_dir(const char *base, int for_tmpdir, char *dir, size_t 
 		snprintf(why, whysize, "cannot make %s: %s", dir, strerror(errno));
 		return -1;
 	}
+	touch_to_write(&st, sizeof st);
 	if (lstat(dir, &st) != 0 || !S_ISDIR(st.st_mode) || st.st_uid != getuid() || (st.st_mode & 077) != 0) {
 		snprintf(why, whysize, "%s is not a private directory of this user", dir);
 		return -1;
@@ -747,6 +779,7 @@ static int write_file(const char *path, const unsigned char *data, size_t n)
 	int fd = open(path, O_RDONLY);
 
 	if (fd >= 0) {
+		touch_to_write(old, sizeof old);
 		ssize_t got = read(fd, old, sizeof old);
 		close(fd);
 		if (got == (ssize_t)n && memcmp(old, data, n) == 0)
@@ -777,6 +810,7 @@ static int make_parents(const char *dir, const char *rel)
 			return -1;
 		if (mkdir(path, 0700) != 0 && errno != EEXIST)
 			return -1;
+		touch_to_write(&st, sizeof st);
 		if (lstat(path, &st) != 0 || !S_ISDIR(st.st_mode))
 			return -1;
 	}
@@ -833,6 +867,7 @@ static void rule_zone(void)
 					continue;
 				snprintf(path, sizeof path, "%s/%s", zdir, e->d_name);
 				snprintf(target, sizeof target, "%s/%s", src, e->d_name);
+				touch_to_write(&st, sizeof st);
 				if (lstat(path, &st) != 0 && symlink(target, path) != 0 && errno != EEXIST) {
 					closedir(d);
 					goto fail;
@@ -866,7 +901,7 @@ static char *own_path(void)
 		procfs_debuginfo info;
 		char path[PATH_MAX];
 	} map;
-	char path[PATH_MAX + 1];
+	char path[PATH_MAX + 1], resolved[PATH_MAX];
 	int fd = open("/proc/self/as", O_RDONLY);
 
 	if (fd < 0)
@@ -879,7 +914,12 @@ static char *own_path(void)
 	close(fd);
 	/* Reported without the leading '/', or as given if relative ("./bin/x"). */
 	snprintf(path, sizeof path, "%s%s", map.info.path[0] == '/' || map.info.path[0] == '.' ? "" : "/", map.info.path);
-	return realpath(path, NULL);
+	/* Called while the runtime runs (/proc/self/exe): realpath into a buffer
+	 * of our own, touched first, rather than one libc allocates. */
+	touch_to_write(resolved, sizeof resolved);
+	if (realpath(path, resolved) == NULL)
+		return NULL;
+	return strdup(resolved);
 }
 
 int main(int argc, char **argv)
